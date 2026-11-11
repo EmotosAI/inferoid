@@ -18,7 +18,7 @@ inferoid setup
 `inferoid setup` walks you through it:
 
 1. Looks at your Mac and recommends a model. From 24 GB it is Nemotron 3.5 Lightning 30B (19 GB), the fastest in our [handover benchmark](docs/handover-benchmark.md). On 16 GB it is Nemotron 3.5 Bolt.
-2. Downloads it with Ollama and sets Ollama's context to 64K, which Claude Code needs. On a 24 GB Mac it also offers to let the GPU use 21 GB of memory (`sudo sysctl iogpu.wired_limit_mb=21504`); without that, Ollama refuses to load Nemotron. macOS resets this when you restart, and `claude-local` offers it again.
+2. Downloads it with Ollama and sets Ollama's context to 64K, which Claude Code needs. On a 24 GB Mac it also offers to let the GPU use 21 GB of memory (`sudo sysctl iogpu.wired_limit_mb=21504`); without that, Ollama refuses to load Nemotron. macOS resets this when you restart the Mac, and Ollama only reads it when it starts; `claude-local` offers the change again when needed and restarts the Ollama app if it still holds the old limit.
 3. Asks which coding agent you use. Claude Code for now; Codex, Cursor, Hermes and OpenClaw are next.
 4. Asks for your handoff settings: keep a `HANDOFF.md` plan (on), the usage level at which Claude must update it first (90%), and whether this applies to all projects or one folder.
 5. Offers to build your usage report: where your Claude limit goes, and what the local model saved.

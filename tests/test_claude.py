@@ -102,3 +102,12 @@ def test_memory_hint_on_24gb(monkeypatch):
     assert claude.gpu_limit_needed(19.0, {"ram_gb": 24.0, "wired_limit_gb": 0.0}) == 21504
     assert claude.gpu_limit_needed(19.0, {"ram_gb": 48.0, "wired_limit_gb": 0.0}) == 0
     assert claude.preflight("nemotron-3.5-lightning:30b-a3b", 19.0, {"ram_gb": 24.0, "wired_limit_gb": 21.0}) == []
+
+
+def test_ensure_loaded_restarts_once_on_memory_error():
+    calls, restarts = [], []
+    errs = iter(["model requires 17.7 GiB but only 15.5 GiB are available", ""])
+    assert claude.ensure_loaded("m", restart=lambda: restarts.append(1) or True, load=lambda m: calls.append(m) or next(errs)) == ""
+    assert len(calls) == 2 and len(restarts) == 1
+    assert claude.ensure_loaded("m", restart=lambda: False, load=lambda m: "model requires 17.7 GiB") == "model requires 17.7 GiB"
+    assert claude.ensure_loaded("m", restart=lambda: 1 / 0, load=lambda m: "") == ""  # no restart when it loads

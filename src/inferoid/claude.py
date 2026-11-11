@@ -13,6 +13,7 @@ import shutil
 import subprocess
 import sys
 import time
+import urllib.error
 import urllib.request
 from pathlib import Path
 from typing import Any, Callable
@@ -288,7 +289,54 @@ def raise_gpu_limit(want_mb: int, ask: Callable[[str], bool]) -> bool:
     if not ask(f"Let the GPU use {gb:.0f} GB of memory now? This runs `sudo sysctl iogpu.wired_limit_mb={want_mb}` "
                "and asks for your Mac password. It resets when you restart the Mac."):
         return False
-    return subprocess.call(["sudo", "sysctl", f"iogpu.wired_limit_mb={want_mb}"]) == 0
+    if subprocess.call(["sudo", "sysctl", f"iogpu.wired_limit_mb={want_mb}"]) != 0:
+        return False
+    restart_ollama()  # Ollama reads the GPU memory limit only when it starts
+    return True
+
+
+def restart_ollama(wait_s: float = 30.0) -> bool:
+    """Quit and reopen the Ollama app, then wait for its API. False if Ollama is not the macOS app or does not come back."""
+    if platform.system() != "Darwin" or subprocess.call(["pgrep", "-x", "Ollama"], stdout=subprocess.DEVNULL) != 0:
+        return False
+    print("Restarting the Ollama app so it sees the new memory limit...")
+    subprocess.call(["osascript", "-e", 'quit app "Ollama"'], stderr=subprocess.DEVNULL)
+    time.sleep(3)
+    subprocess.call(["open", "-a", "Ollama"], stderr=subprocess.DEVNULL)
+    end = time.time() + wait_s
+    while time.time() < end:
+        try:
+            _ollama("/api/version")
+            return True
+        except OSError:
+            time.sleep(1)
+    return False
+
+
+def warm_up(model: str, timeout: float = 300.0) -> str:
+    """Load the model with the 64K context Claude Code will use. Returns Ollama's error text, or '' when it loaded."""
+    body = json.dumps({"model": model, "prompt": "", "keep_alive": "30m", "options": {"num_ctx": LOCAL_CONTEXT}}).encode()
+    req = urllib.request.Request(OLLAMA + "/api/generate", body, {"Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            resp.read()
+        return ""
+    except urllib.error.HTTPError as exc:
+        try:
+            return json.loads(exc.read()).get("error", str(exc))
+        except ValueError:
+            return str(exc)
+    except OSError as exc:
+        return str(exc)
+
+
+def ensure_loaded(model: str, restart: Callable[[], bool] = restart_ollama, load: Callable[[str], str] = warm_up) -> str:
+    """Load the model; on a 'requires N GiB' memory error, restart Ollama once (it may hold an old limit) and retry."""
+    print(f"Loading {model_label(model)}...")
+    err = load(model)
+    if err and "requires" in err and "GiB" in err and restart():
+        err = load(model)
+    return err
 
 
 def _launchctl(name: str) -> str:
@@ -345,6 +393,14 @@ def local(project: Path, model: str | None, resume: bool, dry_run: bool = False)
         print(note.replace("hint: ", "").replace("memory: ", ""))
     if any(not n.startswith("hint:") for n in notes) and not dry_run:
         return 1
+    if not dry_run:
+        err = ensure_loaded(model)
+        if err:
+            print(f"Ollama could not load {model}: {err}")
+            if "GiB" in err:
+                need = gpu_limit_needed(gb, memory) or int(min(memory.get("ram_gb", 24) - 3, gb + 2) * 1024)
+                print(f"Fix: sudo sysctl iogpu.wired_limit_mb={need}, then quit and reopen the Ollama app, then run claude-local again.")
+            return 1
     args, env, mode = local_command(project, model, resume)
     if mode == "plain":
         print("No HANDOFF.md here, so the local model starts without a plan. Use --resume to continue the last session instead.")
