@@ -1,0 +1,6 @@
+{"type":"user","timestamp":"2099-01-01T12:00:00Z","cwd":"/synthetic/project","message":{"role":"user","content":"Run the test suite."}}
+{"type":"assistant","timestamp":"2099-01-01T12:00:01Z","requestRef":"request-1","message":{"role":"assistant","model":"gpt-oss:20b","usage":{"input_tokens":100,"cache_read_input_tokens":0,"output_tokens":1},"content":[{"type":"thinking","thinking":"Synthetic reasoning."}]}}
+{"type":"assistant","timestamp":"2099-01-01T12:00:01Z","requestRef":"request-1","message":{"role":"assistant","model":"gpt-oss:20b","usage":{"input_tokens":100,"cache_read_input_tokens":0,"output_tokens":1},"content":[{"type":"tool_use","name":"Read","input":{"file_path":"/synthetic/project/test.py"}}]}}
+{"type":"user","timestamp":"2099-01-01T12:00:02Z","message":{"role":"user","content":[{"type":"tool_result","content":"synthetic output"}]}}
+{"type":"assistant","timestamp":"2099-01-01T12:00:03Z","requestRef":"request-2","message":{"role":"assistant","model":"gpt-oss:20b","usage":{"input_tokens":5,"output_tokens":1},"content":[{"type":"thinking","thinking":"Synthetic reasoning."}]}}
+{"type":"assistant","timestamp":"2099-01-01T12:00:03Z","requestRef":"request-2","message":{"role":"assistant","model":"gpt-oss:20b","usage":{"input_tokens":2,"cache_read_input_tokens":120,"output_tokens":3},"content":[{"type":"text","text":"Synthetic answer."}]}}

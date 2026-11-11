@@ -1,0 +1,47 @@
+{
+  "as_of": "2026-11-10",
+  "owner_test_machine": {
+    "chip": "Apple M4",
+    "ram_gb": 24,
+    "default_gpu_usable_gb": 16,
+    "note": "About 16 GB is usable by the GPU by default; actual fit depends on the backend, context length, quantization, and other services."
+  },
+  "notes": "Approximate memory includes 4-bit weights plus runtime overhead. Context length and KV-cache memory can be the limiting factor.",
+  "tiers": {
+    "16": {"ram_label": "16-32 GB", "max_context_tokens": 16000},
+    "48": {"ram_label": "48-64 GB", "max_context_tokens": 32000},
+    "128": {"ram_label": "128 GB+", "max_context_tokens": 64000}
+  },
+  "classes": [
+    {
+      "class": "4-8B dense",
+      "ram_gb": 16,
+      "memory_need_gb": "about 4-8",
+      "use": "docs/commit message and short text",
+      "suitable_task_classes": ["docs/commit message", "planning"]
+    },
+    {
+      "class": "gpt-oss-20b",
+      "ram_gb": 16,
+      "memory_need_gb": "about 13",
+      "architecture": "MoE, about 3.6B active parameters",
+      "use": "main local model for the 16-32 GB tier, including bounded coding, tests, search, and focused edits",
+      "suitable_task_classes": ["search/read code", "small edit", "tests", "docs/commit message"]
+    },
+    {
+      "class": "30B-A3B coder MoE",
+      "ram_gb": 48,
+      "memory_need_gb": "about 18",
+      "use": "bounded coding tasks on larger-memory machines",
+      "fit_note": "Does not fit the owner's 24 GB Mac by default without 3-bit quantization.",
+      "suitable_task_classes": ["search/read code", "small edit", "tests", "docs/commit message"]
+    },
+    {
+      "class": "coding + judge + embedding",
+      "ram_gb": 128,
+      "memory_need_gb": "model-dependent",
+      "use": "coding model, judge, and embedding model resident at once",
+      "suitable_task_classes": ["all classified classes"]
+    }
+  ]
+}
