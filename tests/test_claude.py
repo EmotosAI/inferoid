@@ -80,11 +80,11 @@ def test_stopfailure_records_limit(tmp_path, monkeypatch):
 
 
 def test_local_command_and_model_pick(tmp_path):
-    args, env, mode = claude.local_command(tmp_path, "nemotron-3.5-lightning:30b-a3b", resume=False)
-    assert mode == "plain" and args[:3] == ["claude", "--model", "nemotron-3.5-lightning:30b-a3b"]
+    args, env, mode = claude.local_command(tmp_path, "nemotron-3.5-lightning:30b-a3b-mlx", resume=False)
+    assert mode == "plain" and args[:3] == ["claude", "--model", "nemotron-3.5-lightning:30b-a3b-mlx"]
     picker = json.loads(args[args.index("--settings") + 1])["modelPicker"]
     assert json.loads(args[args.index("--settings") + 1])["disableAllHooks"] is True
-    assert picker["replaceBuiltInOptions"] and picker["options"][0]["model"] == "nemotron-3.5-lightning:30b-a3b"
+    assert picker["replaceBuiltInOptions"] and picker["options"][0]["model"] == "nemotron-3.5-lightning:30b-a3b-mlx"
     assert "--strict-mcp-config" in args and args[args.index("--tools") + 1] == claude.LEAN_TOOLS
     assert "--strict-mcp-config" not in claude.local_command(tmp_path, "m", resume=False, full=True)[0]
     assert env["ANTHROPIC_BASE_URL"].startswith("http") and env["ANTHROPIC_AUTH_TOKEN"] == "ollama" and env["ANTHROPIC_API_KEY"] == ""
@@ -92,19 +92,19 @@ def test_local_command_and_model_pick(tmp_path):
     args, _, mode = claude.local_command(tmp_path, "m", resume=False)
     assert mode == "handoff" and "HANDOFF.md" in args[-1]
     assert claude.local_command(tmp_path, "m", resume=True)[2] == "resume"
-    assert claude.pick_model({"ram_gb": 24})[0] == "nemotron-3.5-lightning:30b-a3b"
+    assert claude.pick_model({"ram_gb": 24})[0] == "nemotron-3.5-lightning:30b-a3b-mlx"
     assert claude.pick_model({"ram_gb": 16})[0] == "nemotron-3.5-bolt:e4b"
 
 
 def test_memory_hint_on_24gb(monkeypatch):
-    monkeypatch.setattr(claude, "_ollama", lambda path: {"models": [{"name": "nemotron-3.5-lightning:30b-a3b"}]})
+    monkeypatch.setattr(claude, "_ollama", lambda path: {"models": [{"name": "nemotron-3.5-lightning:30b-a3b-mlx"}]})
     monkeypatch.setattr(claude.shutil, "which", lambda name: "/usr/bin/" + name)
     monkeypatch.setenv("OLLAMA_CONTEXT_LENGTH", "65536")
-    notes = claude.preflight("nemotron-3.5-lightning:30b-a3b", 19.0, {"ram_gb": 24.0, "wired_limit_gb": 0.0})
+    notes = claude.preflight("nemotron-3.5-lightning:30b-a3b-mlx", 19.0, {"ram_gb": 24.0, "wired_limit_gb": 0.0})
     assert len(notes) == 1 and notes[0].startswith("memory:") and "iogpu.wired_limit_mb=21504" in notes[0]
     assert claude.gpu_limit_needed(19.0, {"ram_gb": 24.0, "wired_limit_gb": 0.0}) == 21504
     assert claude.gpu_limit_needed(19.0, {"ram_gb": 48.0, "wired_limit_gb": 0.0}) == 0
-    assert claude.preflight("nemotron-3.5-lightning:30b-a3b", 19.0, {"ram_gb": 24.0, "wired_limit_gb": 21.0}) == []
+    assert claude.preflight("nemotron-3.5-lightning:30b-a3b-mlx", 19.0, {"ram_gb": 24.0, "wired_limit_gb": 21.0}) == []
 
 
 def test_ensure_loaded_restarts_once_on_memory_error():
@@ -114,3 +114,13 @@ def test_ensure_loaded_restarts_once_on_memory_error():
     assert len(calls) == 2 and len(restarts) == 1
     assert claude.ensure_loaded("m", restart=lambda: False, load=lambda m: "model requires 17.7 GiB") == "model requires 17.7 GiB"
     assert claude.ensure_loaded("m", restart=lambda: 1 / 0, load=lambda m: "") == ""  # no restart when it loads
+
+
+def test_saved_old_default_moves_to_mlx_build(tmp_path, monkeypatch, capsys):
+    _env(tmp_path, monkeypatch)
+    (tmp_path / "shadowhome" / "config.json").parent.mkdir(parents=True, exist_ok=True)
+    (tmp_path / "shadowhome" / "config.json").write_text(json.dumps({"model": "nemotron-3.5-lightning:30b-a3b"}))
+    monkeypatch.setattr(claude, "_ollama", lambda path: {"models": []})
+    assert claude.local(tmp_path, None, resume=False, dry_run=True) == 0
+    out = capsys.readouterr().out
+    assert "nemotron-3.5-lightning:30b-a3b-mlx" in out and "faster build" in out

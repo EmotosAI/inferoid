@@ -18,7 +18,7 @@ from .night import machine_memory
 MIN_CLAUDE = (2, 1, 242)  # --settings modelPicker
 LAUNCHER = "claude-local"
 CHOICES = [
-    ("nemotron-3.5-lightning:30b-a3b", 24, "fastest in our 24 GB handover test (docs/handover-benchmark.md)"),
+    ("nemotron-3.5-lightning:30b-a3b-mlx", 24, "fastest in our 24 GB handover test; this MLX build reads and writes faster on Apple chips"),
     ("gpt-oss:20b", 24, "second in the same test"),
     ("nemotron-3.5-bolt:e4b", 8, "for 16 GB Macs"),
 ]

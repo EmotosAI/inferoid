@@ -40,10 +40,12 @@ LOCAL_CONTEXT = 65536
 # Handover model by unified memory. Picked from the 2026-11-11 handover benchmark (docs/handover-benchmark.md).
 LOCAL_MODELS = [
     # (min_ram_gb, ollama model, approx GPU GB at 64K context)
-    (24, "nemotron-3.5-lightning:30b-a3b", 19.0),
+    (24, "nemotron-3.5-lightning:30b-a3b-mlx", 19.0),  # Ollama MLX build: ~25% faster prefill, ~33% faster decode than GGUF (2026-10 M5 Pro run)
     (0, "nemotron-3.5-bolt:e4b", 7.5),
 ]
 DEFAULT_THRESHOLD = 90.0
+# Earlier defaults that a newer build replaces; saved configs move to the new one.
+REPLACED_DEFAULTS = {"nemotron-3.5-lightning:30b-a3b": "nemotron-3.5-lightning:30b-a3b-mlx"}
 MARK = "inferoid claude"
 
 
@@ -270,7 +272,7 @@ def preflight(model: str, model_gb: float, memory: dict[str, float]) -> list[str
     return notes
 
 
-MODEL_GB = {"nemotron-3.5-lightning:30b-a3b": 19.0, "gpt-oss:20b": 14.0, "nemotron-3.5-bolt:e4b": 7.5}
+MODEL_GB = {"nemotron-3.5-lightning:30b-a3b-mlx": 19.0, "nemotron-3.5-lightning:30b-a3b": 19.0, "gpt-oss:20b": 14.0, "nemotron-3.5-bolt:e4b": 7.5}
 
 
 def gpu_limit_needed(model_gb: float, memory: dict[str, float]) -> int:
@@ -348,6 +350,7 @@ def _launchctl(name: str) -> str:
 
 
 MODEL_LABELS = {
+    "nemotron-3.5-lightning:30b-a3b-mlx": "Nemotron 3.5 Lightning 30B (MLX)",
     "nemotron-3.5-lightning:30b-a3b": "Nemotron 3.5 Lightning 30B",
     "nemotron-3.5-bolt:e4b": "Nemotron 3.5 Bolt",
     "gpt-oss:20b": "gpt-oss 20B",
@@ -389,7 +392,11 @@ def local(project: Path, model: str | None, resume: bool, dry_run: bool = False,
 
     memory = machine_memory()
     picked, gb = pick_model(memory)
-    model = model or _read(state_dir().parent / "config.json", {}).get("model") or picked
+    saved = _read(state_dir().parent / "config.json", {}).get("model")
+    if saved in REPLACED_DEFAULTS and not model:
+        print(f"Using {REPLACED_DEFAULTS[saved]}, the faster build of your saved model (run inferoid setup to change).")
+        saved = REPLACED_DEFAULTS[saved]
+    model = model or saved or picked
     gb = MODEL_GB.get(model, gb if model == picked else 0.0)
     notes = preflight(model, gb, memory)
     want = gpu_limit_needed(gb, memory)

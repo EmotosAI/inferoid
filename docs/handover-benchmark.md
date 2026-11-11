@@ -13,6 +13,8 @@ Question: when Claude Code stops partway through a task, can a free local model 
   - **Resume**: the whole Claude conversation, continued with `claude --resume`.
   - **From scratch**: no Claude, no plan, just the task.
 
+Models were Ollama's standard (GGUF) builds. inferoid now installs Nemotron's MLX build, which should be faster still; it has not been rerun on this test.
+
 ## Results
 
 | Model | Handoff only | Resume full session | From scratch |
