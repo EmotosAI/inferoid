@@ -362,7 +362,9 @@ def picker_settings(model: str) -> str:
     """Session-only /model list: just the local model, so no Claude model is offered against Ollama."""
     row = {"model": model, "label": f"{model_label(model)} (local, free)",
            "description": "Runs on this Mac through Ollama. Your Claude login is not used."}
-    return json.dumps({"modelPicker": {"options": [row], "replaceBuiltInOptions": True}})
+    # disableAllHooks: plugin hooks (e.g. a SessionStart hook that tells the model to load skills) cost the local model
+    # minutes of reading on every new session; the local session needs none of them.
+    return json.dumps({"modelPicker": {"options": [row], "replaceBuiltInOptions": True}, "disableAllHooks": True})
 
 
 # Lean start for local sessions. Measured with Claude Code 2.1.281 (2026-11-11): the normal first request carries
@@ -416,7 +418,13 @@ def local(project: Path, model: str | None, resume: bool, dry_run: bool = False,
         print(f"Claude hit its usage limit at {time.strftime('%H:%M', time.localtime(hit['ts']))}.")
     with (state_dir() / "handoffs.jsonl").open("a") as fh:
         fh.write(json.dumps({"ts": time.time(), "cwd": str(project), "model": model, "mode": mode}) + "\n")
-    print(f"Starting Claude Code on {model} (free, local). Your Claude login is not used. Type /exit to stop; run `claude` to go back to Claude.")
+    from importlib.metadata import PackageNotFoundError, version
+
+    try:
+        ver = version("inferoid")
+    except PackageNotFoundError:
+        ver = "dev"
+    print(f"inferoid {ver}: starting Claude Code on {model} (free, local). Your Claude login is not used. Type /exit to stop; run `claude` to go back to Claude.")
     if dry_run:
         print(" ".join(args))
         return 0

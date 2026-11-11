@@ -83,6 +83,7 @@ def test_local_command_and_model_pick(tmp_path):
     args, env, mode = claude.local_command(tmp_path, "nemotron-3.5-lightning:30b-a3b", resume=False)
     assert mode == "plain" and args[:3] == ["claude", "--model", "nemotron-3.5-lightning:30b-a3b"]
     picker = json.loads(args[args.index("--settings") + 1])["modelPicker"]
+    assert json.loads(args[args.index("--settings") + 1])["disableAllHooks"] is True
     assert picker["replaceBuiltInOptions"] and picker["options"][0]["model"] == "nemotron-3.5-lightning:30b-a3b"
     assert "--strict-mcp-config" in args and args[args.index("--tools") + 1] == claude.LEAN_TOOLS
     assert "--strict-mcp-config" not in claude.local_command(tmp_path, "m", resume=False, full=True)[0]

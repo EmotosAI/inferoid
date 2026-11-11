@@ -24,6 +24,8 @@ inferoid setup
 5. Offers to build your usage report: where your Claude limit goes, and what the local model saved.
 6. Installs the settings and a `claude-local` command, then prints what you chose.
 
+To update later: `git pull && uv tool install --force --reinstall .` in the cloned folder. `claude-local` prints the installed version when it starts.
+
 ## Daily use
 
 ```sh
@@ -33,7 +35,7 @@ inferoid claude status    # 5-hour and weekly usage, reset times, open steps in 
 claude                    # limit reset: back to Claude, which reads HANDOFF.md too
 ```
 
-In a `claude-local` session, Claude Code shows "claude.ai connectors are disabled": expected, because that session does not use your claude.ai login. `/model` lists the local model as "(local, free)". It starts lean: no MCP servers or skills and six core tools (Bash, Read, Edit, Write, Glob, Grep), which cuts what the model must read before your first message from about 43K tokens to about 5K. `claude-local --full` loads everything. `claude-local --resume` continues the last full conversation instead of starting from the plan; it works, but is several times slower on a 24 GB Mac because the whole conversation has to be read again.
+In a `claude-local` session, Claude Code shows "claude.ai connectors are disabled": expected, because that session does not use your claude.ai login. `/model` lists the local model as "(local, free)". It starts lean: no MCP servers, skills or hooks, and six core tools (Bash, Read, Edit, Write, Glob, Grep), which cuts what the model must read before your first message from about 43K tokens to about 5K. `claude-local --full` loads everything. `claude-local --resume` continues the last full conversation instead of starting from the plan; it works, but is several times slower on a 24 GB Mac because the whole conversation has to be read again.
 
 ## How it works
 
