@@ -8,13 +8,14 @@ from __future__ import annotations
 
 import json
 import os
+import platform
 import shutil
 import subprocess
 import sys
 import time
 import urllib.request
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 RULES_BEGIN = "<!-- inferoid:handoff-rules -->"
 RULES_END = "<!-- /inferoid:handoff-rules -->"
@@ -261,12 +262,33 @@ def preflight(model: str, model_gb: float, memory: dict[str, float]) -> list[str
     if not ctx or int(ctx) < LOCAL_CONTEXT:
         notes.append(f"hint: Claude Code's own instructions are ~20K tokens. Give Ollama a 64K context: "
                      f"launchctl setenv OLLAMA_CONTEXT_LENGTH {LOCAL_CONTEXT}, then quit and reopen Ollama.")
-    budget = gpu_budget(memory)
-    if memory.get("ram_gb", 0) and model_gb + 1.5 > budget:
-        want = int(min(memory["ram_gb"] - 3, model_gb + 2) * 1024)
-        notes.append(f"hint: {model} needs ~{model_gb:.0f} GB of GPU memory; macOS allows {budget:.0f} GB, so part runs on the CPU (slower). "
-                     f"For full speed until the next reboot: sudo sysctl iogpu.wired_limit_mb={want}")
+    want = gpu_limit_needed(model_gb, memory)
+    if want:
+        notes.append(f"memory: {model} needs ~{model_gb:.0f} GB of GPU memory and macOS allows {gpu_budget(memory):.0f} GB, "
+                     f"so Ollama will refuse to load it. Raise the limit (resets when you restart the Mac): sudo sysctl iogpu.wired_limit_mb={want}")
     return notes
+
+
+MODEL_GB = {"nemotron-3.5-lightning:30b-a3b": 19.0, "gpt-oss:20b": 14.0, "nemotron-3.5-bolt:e4b": 7.5}
+
+
+def gpu_limit_needed(model_gb: float, memory: dict[str, float]) -> int:
+    """MB to set iogpu.wired_limit_mb to, or 0 when the model already fits. Leaves 3 GB for macOS."""
+    ram = memory.get("ram_gb", 0)
+    if not ram or model_gb + 1.5 <= gpu_budget(memory):
+        return 0
+    return int(min(ram - 3, model_gb + 2) * 1024)
+
+
+def raise_gpu_limit(want_mb: int, ask: Callable[[str], bool]) -> bool:
+    """Offer to run the sudo sysctl that lets the GPU use more memory. True when the limit is now high enough."""
+    if platform.system() != "Darwin":
+        return False
+    gb = want_mb / 1024
+    if not ask(f"Let the GPU use {gb:.0f} GB of memory now? This runs `sudo sysctl iogpu.wired_limit_mb={want_mb}` "
+               "and asks for your Mac password. It resets when you restart the Mac."):
+        return False
+    return subprocess.call(["sudo", "sysctl", f"iogpu.wired_limit_mb={want_mb}"]) == 0
 
 
 def _launchctl(name: str) -> str:
@@ -311,11 +333,17 @@ def local(project: Path, model: str | None, resume: bool, dry_run: bool = False)
     memory = machine_memory()
     picked, gb = pick_model(memory)
     model = model or _read(state_dir().parent / "config.json", {}).get("model") or picked
-    gb = gb if model == picked else 0.0
+    gb = MODEL_GB.get(model, gb if model == picked else 0.0)
     notes = preflight(model, gb, memory)
+    want = gpu_limit_needed(gb, memory)
+    if want and not dry_run:
+        def ask(question: str) -> bool:
+            return input(question + " (Y/n) ").strip().lower() in ("", "y", "yes")
+        if raise_gpu_limit(want, ask):
+            notes = [n for n in notes if not n.startswith("memory:")]
     for note in notes:
-        print(note)
-    if any(not n.startswith("hint:") for n in notes):
+        print(note.replace("hint: ", "").replace("memory: ", ""))
+    if any(not n.startswith("hint:") for n in notes) and not dry_run:
         return 1
     args, env, mode = local_command(project, model, resume)
     if mode == "plain":

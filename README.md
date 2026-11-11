@@ -18,10 +18,11 @@ inferoid setup
 `inferoid setup` walks you through it:
 
 1. Looks at your Mac and recommends a model. From 24 GB it is Nemotron 3.5 Lightning 30B (19 GB), the fastest in our [handover benchmark](docs/handover-benchmark.md). On 16 GB it is Nemotron 3.5 Bolt.
-2. Downloads it with Ollama and sets Ollama's context to 64K, which Claude Code needs.
+2. Downloads it with Ollama and sets Ollama's context to 64K, which Claude Code needs. On a 24 GB Mac it also offers to let the GPU use 21 GB of memory (`sudo sysctl iogpu.wired_limit_mb=21504`); without that, Ollama refuses to load Nemotron. macOS resets this when you restart, and `claude-local` offers it again.
 3. Asks which coding agent you use. Claude Code for now; Codex, Cursor, Hermes and OpenClaw are next.
 4. Asks for your handoff settings: keep a `HANDOFF.md` plan (on), the usage level at which Claude must update it first (90%), and whether this applies to all projects or one folder.
-5. Installs the settings and a `claude-local` command, then prints what you chose.
+5. Offers to build your usage report: where your Claude limit goes, and what the local model saved.
+6. Installs the settings and a `claude-local` command, then prints what you chose.
 
 ## Daily use
 
@@ -32,7 +33,7 @@ inferoid claude status    # 5-hour and weekly usage, reset times, open steps in 
 claude                    # limit reset: back to Claude, which reads HANDOFF.md too
 ```
 
-In a `claude-local` session, `/model` lists the local model as "(local, free)". `claude-local --resume` continues the last full conversation instead of starting from the plan; it works, but is several times slower on a 24 GB Mac because the whole conversation has to be read again.
+In a `claude-local` session, Claude Code shows "claude.ai connectors are disabled": expected, because that session does not use your claude.ai login. `/model` lists the local model as "(local, free)". `claude-local --resume` continues the last full conversation instead of starting from the plan; it works, but is several times slower on a 24 GB Mac because the whole conversation has to be read again.
 
 ## How it works
 

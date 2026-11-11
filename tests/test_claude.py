@@ -98,5 +98,7 @@ def test_memory_hint_on_24gb(monkeypatch):
     monkeypatch.setattr(claude.shutil, "which", lambda name: "/usr/bin/" + name)
     monkeypatch.setenv("OLLAMA_CONTEXT_LENGTH", "65536")
     notes = claude.preflight("nemotron-3.5-lightning:30b-a3b", 19.0, {"ram_gb": 24.0, "wired_limit_gb": 0.0})
-    assert len(notes) == 1 and notes[0].startswith("hint:") and "iogpu.wired_limit_mb=21504" in notes[0]
+    assert len(notes) == 1 and notes[0].startswith("memory:") and "iogpu.wired_limit_mb=21504" in notes[0]
+    assert claude.gpu_limit_needed(19.0, {"ram_gb": 24.0, "wired_limit_gb": 0.0}) == 21504
+    assert claude.gpu_limit_needed(19.0, {"ram_gb": 48.0, "wired_limit_gb": 0.0}) == 0
     assert claude.preflight("nemotron-3.5-lightning:30b-a3b", 19.0, {"ram_gb": 24.0, "wired_limit_gb": 21.0}) == []

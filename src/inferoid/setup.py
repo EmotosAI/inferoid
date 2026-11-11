@@ -22,7 +22,7 @@ CHOICES = [
     ("gpt-oss:20b", 24, "second in the same test"),
     ("nemotron-3.5-bolt:e4b", 8, "for 16 GB Macs"),
 ]
-MODEL_GB = {"nemotron-3.5-lightning:30b-a3b": 19.0, "gpt-oss:20b": 14.0, "nemotron-3.5-bolt:e4b": 7.5}
+MODEL_GB = claude.MODEL_GB
 
 
 def config_path() -> Path:
@@ -58,9 +58,23 @@ def _ollama_models() -> set[str] | None:
         return None
 
 
+def _build_report() -> str:
+    import contextlib
+    import io
+
+    from .parsers import format_scan, scan
+    from .reporting import report
+
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        print(format_scan(scan(30)))
+        report(None)
+    return buf.getvalue().strip() + "\nFull report: ~/.inferoid/report.html"
+
+
 def run(project: Path, answers: dict[str, str] | None = None, out: Callable[[str], None] = print,
         pull: Callable[[str], int] | None = None, claude_version: Callable[[], str] | None = None,
-        bin_dir: Path | None = None) -> int:
+        bin_dir: Path | None = None, gpu_raiser: Callable | None = None, reporter: Callable[[], str] | None = None) -> int:
     p = Prompter(answers, out)
     out("Inferoid setup: a free local model for the work your paid agent doesn't need to do.\n")
 
@@ -107,6 +121,13 @@ def run(project: Path, answers: dict[str, str] | None = None, out: Callable[[str
     elif not ctx or int(ctx) < claude.LOCAL_CONTEXT:
         out(f"Start Ollama with OLLAMA_CONTEXT_LENGTH={claude.LOCAL_CONTEXT} (Claude Code's own instructions are ~20K tokens).")
 
+    want = claude.gpu_limit_needed(gb, mem)
+    if want:
+        out(f"\n{claude.model_label(model)} needs ~{gb:.0f} GB of GPU memory, and macOS lets the GPU use {budget:.0f} GB, "
+            "so Ollama would refuse to load it.")
+        if not (gpu_raiser or claude.raise_gpu_limit)(want, lambda q: p.yes("gpu_limit", q)):
+            out(f"Not changed. claude-local will offer this again, or run: sudo sysctl iogpu.wired_limit_mb={want}")
+
     # 3. coding agent
     out("\nWhich coding agent do you use?\n  1. Claude Code\n  (Codex, Cursor, Hermes and OpenClaw: coming soon)")
     if p.ask("harness", "Pick a number", "1") != "1":
@@ -135,6 +156,10 @@ def run(project: Path, answers: dict[str, str] | None = None, out: Callable[[str
     if takeover != "1":
         out("Automatic switching is not in this version yet. Using option 1.")
 
+    out("\nUsage report: shows where your Claude limit goes (by task and step) and what the local model saved. "
+        "It reads the Claude Code and Codex logs already on this Mac; nothing leaves it.")
+    report_now = p.yes("report", "Build it now?")
+
     # 5. apply
     applied = []
     if handoff:
@@ -149,6 +174,12 @@ def run(project: Path, answers: dict[str, str] | None = None, out: Callable[[str
                            "set_up_at": time.strftime("%Y-%m-%d %H:%M")}
     config_path().write_text(json.dumps(cfg, indent=2) + "\n")
 
+    if report_now:
+        try:
+            out((reporter or _build_report)())
+        except Exception as exc:  # the report must never break setup
+            out(f"The report could not be built ({exc}). Try later: inferoid scan && inferoid report")
+
     # 6. summary
     out("\nYou're all set.\n")
     out(f"  Local model     {claude.model_label(model)} ({model})")
@@ -158,15 +189,13 @@ def run(project: Path, answers: dict[str, str] | None = None, out: Callable[[str
         out(f"  Reminder at     {threshold:.0f}% of the 5-hour or weekly limit")
         out(f"  Applies to      {'all projects (~/.claude)' if global_ else 'this folder (' + str(project) + ')'}")
     out("  At the limit    you switch with: claude-local")
+    out("  Usage report    inferoid scan && inferoid report")
     out("\nHow to use it:")
     out("  claude            work as usual with Opus or Sonnet" + (f"; at {threshold:.0f}% Claude updates HANDOFF.md" if handoff else ""))
     out(f"  claude-local      Claude Code on {claude.model_label(model)}, free; /model shows it as \"(local, free)\"")
     out("  inferoid claude status   usage, reset time, HANDOFF.md state")
     if str(bin_dir) not in os.environ.get("PATH", "").split(os.pathsep):
         out(f"\nAdd {bin_dir} to your PATH to use claude-local:  echo 'export PATH=\"{bin_dir}:$PATH\"' >> ~/.zshrc")
-    hint = [n for n in claude.preflight(model, gb, mem) if n.startswith("hint:") and "iogpu" in n]
-    if hint:
-        out("\n" + hint[0].replace("hint: ", "Speed tip: "))
     if handoff:
         out("\nRestart Claude Code so it loads the new settings.")
     return 0
