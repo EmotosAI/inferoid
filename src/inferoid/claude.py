@@ -299,9 +299,10 @@ def restart_ollama(wait_s: float = 30.0) -> bool:
     """Quit and reopen the Ollama app, then wait for its API. False if Ollama is not the macOS app or does not come back."""
     if platform.system() != "Darwin" or subprocess.call(["pgrep", "-x", "Ollama"], stdout=subprocess.DEVNULL) != 0:
         return False
-    print("Restarting the Ollama app so it sees the new memory limit...")
-    subprocess.call(["osascript", "-e", 'quit app "Ollama"'], stderr=subprocess.DEVNULL)
-    time.sleep(3)
+    print("Restarting the Ollama app so it sees the new settings...")
+    # A polite AppleScript quit can be refused ("User canceled"), so stop the app and its server directly.
+    subprocess.call(["killall", "Ollama", "ollama"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    time.sleep(2)
     subprocess.call(["open", "-a", "Ollama"], stderr=subprocess.DEVNULL)
     end = time.time() + wait_s
     while time.time() < end:

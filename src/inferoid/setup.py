@@ -115,9 +115,8 @@ def run(project: Path, answers: dict[str, str] | None = None, out: Callable[[str
     if (not ctx or int(ctx) < claude.LOCAL_CONTEXT) and platform.system() == "Darwin":
         if p.yes("context", "Claude Code needs a 64K context in Ollama. Set it now and restart the Ollama app?"):
             subprocess.call(["launchctl", "setenv", "OLLAMA_CONTEXT_LENGTH", str(claude.LOCAL_CONTEXT)])
-            subprocess.call(["osascript", "-e", 'quit app "Ollama"'], stderr=subprocess.DEVNULL)
-            time.sleep(3)
-            subprocess.call(["open", "-a", "Ollama"], stderr=subprocess.DEVNULL)
+            if not claude.restart_ollama():
+                out("Quit and reopen the Ollama app so it picks up the 64K context.")
     elif not ctx or int(ctx) < claude.LOCAL_CONTEXT:
         out(f"Start Ollama with OLLAMA_CONTEXT_LENGTH={claude.LOCAL_CONTEXT} (Claude Code's own instructions are ~20K tokens).")
 
