@@ -365,10 +365,16 @@ def picker_settings(model: str) -> str:
     return json.dumps({"modelPicker": {"options": [row], "replaceBuiltInOptions": True}})
 
 
-def local_command(project: Path, model: str, resume: bool) -> tuple[list[str], dict[str, str], str]:
+# Lean start for local sessions. Measured with Claude Code 2.1.281 (2026-11-11): the normal first request carries
+# ~43K tokens (49 tool definitions incl. MCP, skills), which a 24 GB Mac reads in ~2.5 min; this set carries ~4.8K.
+LEAN_TOOLS = "Bash,Read,Edit,Write,Glob,Grep"
+LEAN_ARGS = ["--strict-mcp-config", "--disable-slash-commands", "--tools", LEAN_TOOLS, "--effort", "low"]
+
+
+def local_command(project: Path, model: str, resume: bool, full: bool = False) -> tuple[list[str], dict[str, str], str]:
     env = dict(os.environ, ANTHROPIC_BASE_URL=OLLAMA, ANTHROPIC_AUTH_TOKEN="ollama", ANTHROPIC_API_KEY="",
                CLAUDE_CODE_MAX_CONTEXT_TOKENS=str(LOCAL_CONTEXT))
-    args = ["claude", "--model", model, "--settings", picker_settings(model)]
+    args = ["claude", "--model", model, "--settings", picker_settings(model)] + ([] if full else LEAN_ARGS)
     if resume:
         return args + ["--continue"], env, "resume"
     if (project / "HANDOFF.md").exists():
@@ -376,7 +382,7 @@ def local_command(project: Path, model: str, resume: bool) -> tuple[list[str], d
     return args, env, "plain"
 
 
-def local(project: Path, model: str | None, resume: bool, dry_run: bool = False) -> int:
+def local(project: Path, model: str | None, resume: bool, dry_run: bool = False, full: bool = False) -> int:
     from .night import machine_memory
 
     memory = machine_memory()
@@ -402,7 +408,7 @@ def local(project: Path, model: str | None, resume: bool, dry_run: bool = False)
                 need = gpu_limit_needed(gb, memory) or int(min(memory.get("ram_gb", 24) - 3, gb + 2) * 1024)
                 print(f"Fix: sudo sysctl iogpu.wired_limit_mb={need}, then quit and reopen the Ollama app, then run claude-local again.")
             return 1
-    args, env, mode = local_command(project, model, resume)
+    args, env, mode = local_command(project, model, resume, full)
     if mode == "plain":
         print("No HANDOFF.md here, so the local model starts without a plan. Use --resume to continue the last session instead.")
     hit = _read(state_dir() / "limit-hit.json", {})

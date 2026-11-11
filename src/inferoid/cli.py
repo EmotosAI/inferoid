@@ -66,7 +66,7 @@ def claude_main(args: argparse.Namespace) -> int:
     elif args.claude_command == "uninstall":
         print("\n".join(claude.uninstall(project, args.global_)))
     elif args.claude_command == "local":
-        return claude.local(project, args.model, args.resume, args.dry_run)
+        return claude.local(project, args.model, args.resume, args.dry_run, args.full)
     elif args.claude_command == "status":
         print("\n".join(claude.status(project)))
     elif args.claude_command == "statusline":
@@ -120,6 +120,7 @@ def build_parser() -> argparse.ArgumentParser:
     loc.add_argument("--model", help="Ollama model (default: picked by memory)")
     loc.add_argument("--resume", action="store_true", help="Resume the last session instead of starting from HANDOFF.md")
     loc.add_argument("--dry-run", action="store_true")
+    loc.add_argument("--full", action="store_true", help="Load MCP servers, skills and all tools (much slower first reply)")
     cl_cmds.add_parser("status").add_argument("--project", default=".")
     cl_cmds.add_parser("statusline", help="(run by Claude Code) record usage for the status line")
     cl_cmds.add_parser("hook", help="(run by Claude Code) usage reminder hook").add_argument("event")
