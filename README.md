@@ -51,6 +51,10 @@ In a `claude-local` session, Claude Code shows "claude.ai connectors are disable
 
 ## Benchmark
 
+### Benchmark your local models
+
+Run the same task on isolated copies of your repository, collect memory and quality metrics, and optionally share metrics-only reports with Forge. See the [benchmark guide](docs/bench.md).
+
 On a 24 GB M4, Claude started a bug-fix task, wrote its `HANDOFF.md`, and was stopped after 4 steps. Each local model then finished the task from the plan alone:
 
 | Model | Finished from HANDOFF.md |
@@ -89,7 +93,7 @@ inferoid night plan|run|status|mark|schedule
 
 ## Limits of the estimates
 
-Dollar values use the dated public list-price baselines packaged with the application, with input, output, cache-read, and cache-write token fields where available. They are estimates, not invoices. Unknown models are not assigned a default price. Subscription users pay a flat plan, so dollars are API list-price equivalents. Request-level local share remains a heuristic based on classified task class and small or medium size. Step-level local share is a heuristic based on the deterministic step class and tier context limit; it is not a claim that a local model will produce equivalent code. Unclassified, reasoning-only, intermediate-text, web/search, subagent, unknown-tool, large, and over-limit steps do not count. Replay is evidence on a sampled subset, not a benchmark; judged outcomes are not measured equivalence. Missing, encrypted, compacted, provider-internal, and version-specific log fields may be skipped.
+Dollar values use the dated public list-price baselines packaged with the application, with input, output, cache-read, and cache-write token fields where available. They are estimates, not invoices. Unknown models are not assigned a default price. Subscription users pay a flat plan, so dollars are API list-price equivalents. Request-level local share remains a heuristic based on classified task class and brief or moderate size. Step-level local share is a heuristic based on the deterministic step class and tier context limit; it is not a claim that a local model will produce equivalent code. Unclassified, reasoning-only, intermediate-text, web/search, subagent, unknown-tool, large, and over-limit steps do not count. Replay is evidence on a sampled subset, not a benchmark; judged outcomes are not measured equivalence. Missing, encrypted, compacted, provider-internal, and version-specific log fields may be skipped.
 
 ## Development
 

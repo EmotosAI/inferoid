@@ -108,6 +108,35 @@ def build_parser() -> argparse.ArgumentParser:
     night_cmds.choices["schedule"].add_argument("--at", default="01:00", help="HH:MM local time")
     st = commands.add_parser("setup", help="Pick and download a local model and connect it to your coding agent")
     st.add_argument("--project", default=".")
+    bench = commands.add_parser("bench", help="Run isolated Claude Code benchmarks on local models")
+    bench_cmds = bench.add_subparsers(dest="bench_command", required=True)
+    run_bench = bench_cmds.add_parser("run")
+    run_bench.add_argument("--repo", required=True)
+    run_bench.add_argument("--brief", required=True)
+    run_bench.add_argument("--check", required=True)
+    run_bench.add_argument("--pack", required=True)
+    run_bench.add_argument("--task", required=True)
+    run_bench.add_argument("--kind", default="coding")
+    run_bench.add_argument("--model")
+    run_bench.add_argument("--timeout", type=int, default=1800)
+    run_bench.add_argument("--max-turns", type=int, default=60)
+    run_bench.add_argument("--allow-bash", action="append", default=[])
+    run_bench.add_argument("--reference")
+    run_bench.add_argument("--no-submit", action="store_true")
+    run_bench.add_argument("--force", action="store_true")
+    run_bench.add_argument("--keep", action="store_true")
+    run_bench.add_argument("--share", action="append", default=[], metavar="PATH",
+                           help="Project-relative path to link into the benchmark copy (data, audio, caches not in git)")
+    submit_bench = bench_cmds.add_parser("submit")
+    submit_bench.add_argument("files", nargs="+")
+    bench_cmds.add_parser("list")
+    forge_cmd = commands.add_parser("forge", help="Configure and inspect Forge metrics sharing")
+    forge_cmds = forge_cmd.add_subparsers(dest="forge_command", required=True)
+    login = forge_cmds.add_parser("login")
+    login.add_argument("--token", required=True)
+    login.add_argument("--url")
+    forge_cmds.add_parser("status")
+    forge_cmds.add_parser("logout")
     cl = commands.add_parser("claude", help="Claude Code handover to a free local model")
     cl_cmds = cl.add_subparsers(dest="claude_command", required=True)
     for name in ("install", "uninstall"):
@@ -153,4 +182,31 @@ def main(argv: list[str] | None = None) -> int:
         from .setup import run
 
         return run(Path(args.project).resolve())
+    elif args.command == "bench":
+        from pathlib import Path
+
+        from . import bench
+
+        if args.bench_command == "run":
+            code, _ = bench.run(Path(args.repo), Path(args.brief), args.check, args.pack, args.task,
+                                 args.kind, args.model, args.timeout, args.max_turns, args.allow_bash,
+                                 Path(args.reference) if args.reference else None, args.no_submit, args.force, args.keep,
+                                 args.share)
+            return code
+        if args.bench_command == "submit":
+            return bench.submit_files([Path(path) for path in args.files])
+        return bench.list_reports()
+    elif args.command == "forge":
+        from . import forge
+
+        if args.forge_command == "login":
+            try:
+                print(forge.login(args.token, args.url))
+            except ValueError as exc:
+                print(f"Forge login failed: {exc}")
+                return 2
+        elif args.forge_command == "status":
+            print("\n".join(forge.status()))
+        elif args.forge_command == "logout":
+            print(forge.logout())
     return 0
