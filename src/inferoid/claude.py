@@ -35,13 +35,19 @@ HANDOFF_PROMPT = ("Another assistant started work in this repo and was stopped. 
 OLLAMA = os.environ.get("OLLAMA_HOST", "http://127.0.0.1:11434")
 if not OLLAMA.startswith("http"):
     OLLAMA = "http://" + OLLAMA
-LOCAL_CONTEXT = 65536
+LOCAL_CONTEXT = 32768  # floor; the real cap comes from context_for(memory)
 
-# Handover model by unified memory. Picked from the 2026-11-11 handover benchmark (docs/handover-benchmark.md).
+# Memory safety (2026-11-11: a 24 GB Mac froze when Nemotron grew to ~94K tokens of context with the GPU limit
+# raised to 21 GB). Models are picked to fit macOS's DEFAULT GPU budget; the limit is never raised automatically.
+MACOS_RESERVE_GB = 4.0  # never leave macOS less than this when the GPU limit is raised (opt-in only)
+RUNTIME_GB = 2.0  # engine, buffers and compute scratch on top of weights and KV cache
+
+# Preference order; the first that fits safely on this Mac is the default.
 LOCAL_MODELS = [
-    # (min_ram_gb, ollama model, approx GPU GB at 64K context)
-    (24, "nemotron-3.5-lightning:30b-a3b-mlx", 19.0),  # Ollama MLX build: ~25% faster prefill, ~33% faster decode than GGUF (2026-10 M5 Pro run)
-    (0, "nemotron-3.5-bolt:e4b", 7.5),
+    # (ollama model, approx weight GB)
+    ("nemotron-3.5-lightning:30b-a3b-mlx", 19.0),  # Ollama MLX build: ~25% faster prefill, ~33% faster decode than GGUF
+    ("gpt-oss:20b", 14.0),
+    ("nemotron-3.5-bolt:e4b", 7.5),
 ]
 DEFAULT_THRESHOLD = 90.0
 # Earlier defaults that a newer build replaces; saved configs move to the new one.
@@ -230,19 +236,50 @@ def uninstall(project: Path, global_: bool = False) -> list[str]:
 
 # ---------------------------------------------------------------- local session
 
-def pick_model(memory: dict[str, float] | None = None) -> tuple[str, float]:
-    from .night import machine_memory
+def context_for(memory: dict[str, float]) -> int:
+    """Hard context cap by memory tier, enforced in Ollama and in Claude Code (which compacts before it)."""
+    ram = memory.get("ram_gb", 0.0)
+    if ram <= 24:
+        return 32768
+    if ram <= 48:
+        return 65536
+    return 131072
 
-    ram = (memory or machine_memory()).get("ram_gb", 0.0)
-    for min_ram, model, gb in LOCAL_MODELS:
-        if ram >= min_ram:
-            return model, gb
-    return LOCAL_MODELS[-1][1], LOCAL_MODELS[-1][2]
+
+def kv_gb(model: str, tokens: int) -> float:
+    """KV cache estimate. Nemotron Lightning: 6 attention layers x 2 KV heads x 128 dims x 2 (K,V) x 2 bytes =
+    6 KB/token (NVIDIA config.json). Unknown models: assume 24 KB/token (gpt-oss-20b class)."""
+    per_token = 6144 if "nemotron-3.5-lightning" in model else 24576
+    return per_token * tokens / 2**30
+
+
+def default_budget(memory: dict[str, float]) -> float:
+    """GPU memory macOS allows by default (ignores a raised iogpu.wired_limit_mb)."""
+    ram = memory.get("ram_gb", 0.0)
+    return ram * (0.67 if ram <= 36 else 0.75)
 
 
 def gpu_budget(memory: dict[str, float]) -> float:
-    ram, wired = memory.get("ram_gb", 0.0), memory.get("wired_limit_gb", 0.0)
-    return wired if wired > 0 else ram * (0.67 if ram <= 36 else 0.75)
+    wired = memory.get("wired_limit_gb", 0.0)
+    return wired if wired > 0 else default_budget(memory)
+
+
+def memory_need_gb(model: str, model_gb: float, memory: dict[str, float]) -> float:
+    return model_gb + kv_gb(model, context_for(memory)) + RUNTIME_GB
+
+
+def fits_safely(model: str, model_gb: float, memory: dict[str, float]) -> bool:
+    return memory_need_gb(model, model_gb, memory) <= default_budget(memory)
+
+
+def pick_model(memory: dict[str, float] | None = None) -> tuple[str, float]:
+    from .night import machine_memory
+
+    memory = memory or machine_memory()
+    for model, gb in LOCAL_MODELS:
+        if fits_safely(model, gb, memory):
+            return model, gb
+    return LOCAL_MODELS[-1]
 
 
 def _ollama(path: str) -> Any:
@@ -261,26 +298,47 @@ def preflight(model: str, model_gb: float, memory: dict[str, float]) -> list[str
             notes.append(f"Model not downloaded. Run: ollama pull {model}")
     except OSError:
         notes.append("Ollama is not running. Open the Ollama app (or run: ollama serve).")
+    cap = context_for(memory)
     ctx = os.environ.get("OLLAMA_CONTEXT_LENGTH") or _launchctl("OLLAMA_CONTEXT_LENGTH")
-    if not ctx or int(ctx) < LOCAL_CONTEXT:
-        notes.append(f"hint: Claude Code's own instructions are ~20K tokens. Give Ollama a 64K context: "
-                     f"launchctl setenv OLLAMA_CONTEXT_LENGTH {LOCAL_CONTEXT}, then quit and reopen Ollama.")
-    want = gpu_limit_needed(model_gb, memory)
-    if want:
-        notes.append(f"memory: {model} needs ~{model_gb:.0f} GB of GPU memory and macOS allows {gpu_budget(memory):.0f} GB, "
-                     f"so Ollama will refuse to load it. Raise the limit (resets when you restart the Mac): sudo sysctl iogpu.wired_limit_mb={want}")
+    if ctx and ctx.isdigit() and int(ctx) > cap:
+        notes.append(f"memory: Ollama's context is {int(ctx):,} tokens, above the safe {cap:,} for this Mac. Run inferoid setup, or: "
+                     f"launchctl setenv OLLAMA_CONTEXT_LENGTH {cap}, then quit and reopen Ollama.")
+    elif not ctx or (ctx.isdigit() and int(ctx) < cap):
+        notes.append(f"hint: set Ollama's context to {cap:,} tokens for Claude Code: launchctl setenv OLLAMA_CONTEXT_LENGTH {cap}, "
+                     "then quit and reopen Ollama.")
+    problem = memory_problem(model, model_gb, memory)
+    if problem:
+        notes.append("memory: " + problem)
     return notes
 
 
 MODEL_GB = {"nemotron-3.5-lightning:30b-a3b-mlx": 19.0, "nemotron-3.5-lightning:30b-a3b": 19.0, "gpt-oss:20b": 14.0, "nemotron-3.5-bolt:e4b": 7.5}
 
 
-def gpu_limit_needed(model_gb: float, memory: dict[str, float]) -> int:
-    """MB to set iogpu.wired_limit_mb to, or 0 when the model already fits. Leaves 3 GB for macOS."""
-    ram = memory.get("ram_gb", 0)
-    if not ram or model_gb + 1.5 <= gpu_budget(memory):
+def gpu_limit_needed(model: str, model_gb: float, memory: dict[str, float]) -> int:
+    """MB to set iogpu.wired_limit_mb to so the model fits, or 0 when it already fits or cannot fit safely
+    (raising would leave macOS less than MACOS_RESERVE_GB)."""
+    ram = memory.get("ram_gb", 0.0)
+    need = memory_need_gb(model, model_gb, memory)
+    if not ram or need <= gpu_budget(memory) or ram - need < MACOS_RESERVE_GB:
         return 0
-    return int(min(ram - 3, model_gb + 2) * 1024)
+    return int(need * 1024) + 512
+
+
+def memory_problem(model: str, model_gb: float, memory: dict[str, float]) -> str:
+    """Empty when the model fits the current GPU budget; otherwise what to do instead."""
+    ram = memory.get("ram_gb", 0.0)
+    need = memory_need_gb(model, model_gb, memory)
+    if not ram or need <= gpu_budget(memory):
+        return ""
+    if ram - need < MACOS_RESERVE_GB:
+        safe = pick_model(memory)[0]
+        return (f"{model} needs about {need:.0f} GB with a {context_for(memory):,}-token context, which would leave macOS less than "
+                f"{MACOS_RESERVE_GB:.0f} GB on this {ram:.0f} GB Mac and can freeze it. Use {safe} instead (inferoid setup, or --model {safe}).")
+    want = gpu_limit_needed(model, model_gb, memory)
+    return (f"{model} needs about {need:.0f} GB and macOS gives the GPU {gpu_budget(memory):.0f} GB by default. "
+            f"To allow it anyway (leaves macOS {ram - need:.0f} GB; resets on restart): claude-local --allow-gpu-limit, "
+            f"or sudo sysctl iogpu.wired_limit_mb={want}")
 
 
 def raise_gpu_limit(want_mb: int, ask: Callable[[str], bool]) -> bool:
@@ -318,7 +376,10 @@ def restart_ollama(wait_s: float = 30.0) -> bool:
 
 def warm_up(model: str, timeout: float = 300.0) -> str:
     """Load the model with the 64K context Claude Code will use. Returns Ollama's error text, or '' when it loaded."""
-    body = json.dumps({"model": model, "prompt": "", "keep_alive": "30m", "options": {"num_ctx": LOCAL_CONTEXT}}).encode()
+    from .night import machine_memory
+
+    body = json.dumps({"model": model, "prompt": "", "keep_alive": "10m",
+                       "options": {"num_ctx": context_for(machine_memory())}}).encode()
     req = urllib.request.Request(OLLAMA + "/api/generate", body, {"Content-Type": "application/json"})
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
@@ -376,9 +437,11 @@ LEAN_TOOLS = "Bash,Read,Edit,Write,Glob,Grep"
 LEAN_ARGS = ["--strict-mcp-config", "--disable-slash-commands", "--tools", LEAN_TOOLS, "--effort", "low"]
 
 
-def local_command(project: Path, model: str, resume: bool, full: bool = False) -> tuple[list[str], dict[str, str], str]:
+def local_command(project: Path, model: str, resume: bool, full: bool = False,
+                  context: int = LOCAL_CONTEXT) -> tuple[list[str], dict[str, str], str]:
+    # Claude Code compacts the conversation before it reaches this, so the local context never grows past the cap.
     env = dict(os.environ, ANTHROPIC_BASE_URL=OLLAMA, ANTHROPIC_AUTH_TOKEN="ollama", ANTHROPIC_API_KEY="",
-               CLAUDE_CODE_MAX_CONTEXT_TOKENS=str(LOCAL_CONTEXT))
+               CLAUDE_CODE_MAX_CONTEXT_TOKENS=str(context))
     args = ["claude", "--model", model, "--settings", picker_settings(model)] + ([] if full else LEAN_ARGS)
     if resume:
         return args + ["--continue"], env, "resume"
@@ -387,7 +450,8 @@ def local_command(project: Path, model: str, resume: bool, full: bool = False) -
     return args, env, "plain"
 
 
-def local(project: Path, model: str | None, resume: bool, dry_run: bool = False, full: bool = False) -> int:
+def local(project: Path, model: str | None, resume: bool, dry_run: bool = False, full: bool = False,
+          allow_gpu_limit: bool = False) -> int:
     from .night import machine_memory
 
     memory = machine_memory()
@@ -399,10 +463,10 @@ def local(project: Path, model: str | None, resume: bool, dry_run: bool = False,
     model = model or saved or picked
     gb = MODEL_GB.get(model, gb if model == picked else 0.0)
     notes = preflight(model, gb, memory)
-    want = gpu_limit_needed(gb, memory)
-    if want and not dry_run:
+    want = gpu_limit_needed(model, gb, memory)
+    if want and allow_gpu_limit and not dry_run:
         def ask(question: str) -> bool:
-            return input(question + " (Y/n) ").strip().lower() in ("", "y", "yes")
+            return input(question + " (y/N) ").strip().lower() in ("y", "yes")
         if raise_gpu_limit(want, ask):
             notes = [n for n in notes if not n.startswith("memory:")]
     for note in notes:
@@ -414,10 +478,9 @@ def local(project: Path, model: str | None, resume: bool, dry_run: bool = False,
         if err:
             print(f"Ollama could not load {model}: {err}")
             if "GiB" in err:
-                need = gpu_limit_needed(gb, memory) or int(min(memory.get("ram_gb", 24) - 3, gb + 2) * 1024)
-                print(f"Fix: sudo sysctl iogpu.wired_limit_mb={need}, then quit and reopen the Ollama app, then run claude-local again.")
+                print("Fix: " + (memory_problem(model, gb, memory) or "quit and reopen the Ollama app, then run claude-local again."))
             return 1
-    args, env, mode = local_command(project, model, resume, full)
+    args, env, mode = local_command(project, model, resume, full, context_for(memory))
     if mode == "plain":
         print("No HANDOFF.md here, so the local model starts without a plan. Use --resume to continue the last session instead.")
     hit = _read(state_dir() / "limit-hit.json", {})

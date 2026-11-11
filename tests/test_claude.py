@@ -92,19 +92,34 @@ def test_local_command_and_model_pick(tmp_path):
     args, _, mode = claude.local_command(tmp_path, "m", resume=False)
     assert mode == "handoff" and "HANDOFF.md" in args[-1]
     assert claude.local_command(tmp_path, "m", resume=True)[2] == "resume"
-    assert claude.pick_model({"ram_gb": 24})[0] == "nemotron-3.5-lightning:30b-a3b-mlx"
+    # Default picks must fit macOS's default GPU budget (24 GB Mac froze with Nemotron on 2026-11-11).
+    assert claude.pick_model({"ram_gb": 24})[0] == "nemotron-3.5-bolt:e4b"
     assert claude.pick_model({"ram_gb": 16})[0] == "nemotron-3.5-bolt:e4b"
+    assert claude.pick_model({"ram_gb": 48})[0] == "nemotron-3.5-lightning:30b-a3b-mlx"
+    assert claude.context_for({"ram_gb": 24}) == 32768 and claude.context_for({"ram_gb": 48}) == 65536
+    assert claude.context_for({"ram_gb": 128}) == 131072
 
 
-def test_memory_hint_on_24gb(monkeypatch):
-    monkeypatch.setattr(claude, "_ollama", lambda path: {"models": [{"name": "nemotron-3.5-lightning:30b-a3b-mlx"}]})
+def test_memory_guards_on_24gb(monkeypatch):
+    lightning = "nemotron-3.5-lightning:30b-a3b-mlx"
+    monkeypatch.setattr(claude, "_ollama", lambda path: {"models": [{"name": lightning}, {"name": "nemotron-3.5-bolt:e4b"}]})
     monkeypatch.setattr(claude.shutil, "which", lambda name: "/usr/bin/" + name)
+    mac24 = {"ram_gb": 24.0, "wired_limit_gb": 0.0}
+    # 19 GB model + context + runtime would leave macOS < 4 GB: refuse, suggest the safe model, never offer sudo.
+    assert claude.gpu_limit_needed(lightning, 19.0, mac24) == 0
+    problem = claude.memory_problem(lightning, 19.0, mac24)
+    assert "less than 4 GB" in problem and "nemotron-3.5-bolt:e4b" in problem and "sysctl" not in problem
+    # Even with the limit already raised to 21 GB, it does not fit with the context cap.
+    assert claude.memory_problem(lightning, 19.0, {"ram_gb": 24.0, "wired_limit_gb": 21.0})
+    # Ollama context above the tier cap is flagged as a memory problem.
     monkeypatch.setenv("OLLAMA_CONTEXT_LENGTH", "65536")
-    notes = claude.preflight("nemotron-3.5-lightning:30b-a3b-mlx", 19.0, {"ram_gb": 24.0, "wired_limit_gb": 0.0})
-    assert len(notes) == 1 and notes[0].startswith("memory:") and "iogpu.wired_limit_mb=21504" in notes[0]
-    assert claude.gpu_limit_needed(19.0, {"ram_gb": 24.0, "wired_limit_gb": 0.0}) == 21504
-    assert claude.gpu_limit_needed(19.0, {"ram_gb": 48.0, "wired_limit_gb": 0.0}) == 0
-    assert claude.preflight("nemotron-3.5-lightning:30b-a3b-mlx", 19.0, {"ram_gb": 24.0, "wired_limit_gb": 21.0}) == []
+    notes = claude.preflight("nemotron-3.5-bolt:e4b", 7.5, mac24)
+    assert len(notes) == 1 and notes[0].startswith("memory:") and "above the safe 32,768" in notes[0]
+    monkeypatch.setenv("OLLAMA_CONTEXT_LENGTH", "32768")
+    assert claude.preflight("nemotron-3.5-bolt:e4b", 7.5, mac24) == []
+    # On a 32 GB Mac a modest overshoot may be allowed by opt-in, keeping >= 4 GB for macOS.
+    mac32 = {"ram_gb": 32.0, "wired_limit_gb": 0.0}
+    assert claude.gpu_limit_needed("gpt-oss:20b", 23.0, mac32) > 0 or claude.memory_problem("gpt-oss:20b", 23.0, mac32) == ""
 
 
 def test_ensure_loaded_restarts_once_on_memory_error():

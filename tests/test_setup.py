@@ -3,11 +3,11 @@ import json
 from inferoid import claude, setup
 
 
-def _env(tmp_path, monkeypatch, models):
+def _env(tmp_path, monkeypatch, models, ram=24.0):
     monkeypatch.setenv("INFEROID_HOME", str(tmp_path / "home"))
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "dotclaude"))
     monkeypatch.setenv("OLLAMA_CONTEXT_LENGTH", "65536")
-    monkeypatch.setattr(setup, "machine_memory", lambda: {"ram_gb": 24.0, "wired_limit_gb": 0.0})
+    monkeypatch.setattr(setup, "machine_memory", lambda: {"ram_gb": ram, "wired_limit_gb": 0.0})
     monkeypatch.setattr(setup.shutil, "which", lambda name: "/usr/bin/" + name)
     monkeypatch.setattr(setup, "_ollama_models", lambda: set(models))
 
@@ -20,11 +20,12 @@ def test_setup_defaults_on_24gb(tmp_path, monkeypatch):
                    claude_version=lambda: "2.1.322 (Claude Code)", bin_dir=tmp_path / "bin",
                    gpu_raiser=lambda mb, ask: raised.append(mb) or ask("q"), reporter=lambda: "REPORT-OK")
     text = "\n".join(lines)
-    assert rc == 0 and pulled == ["nemotron-3.5-lightning:30b-a3b-mlx"] and raised == [21504]
-    assert "would refuse to load it" in text and "REPORT-OK" in text and "inferoid scan && inferoid report" in text
+    assert rc == 0 and pulled == ["nemotron-3.5-bolt:e4b"] and raised == []
+    assert "32,768-token context cap" in text and "Memory:" not in text
+    assert "REPORT-OK" in text and "inferoid scan && inferoid report" in text
     assert "You're all set." in text and "90% of the 5-hour or weekly limit" in text and "all projects" in text
     cfg = json.loads(setup.config_path().read_text())
-    assert cfg["model"] == "nemotron-3.5-lightning:30b-a3b-mlx" and cfg["threshold"] == 90.0 and cfg["takeover"] == "manual"
+    assert cfg["model"] == "nemotron-3.5-bolt:e4b" and cfg["threshold"] == 90.0 and cfg["takeover"] == "manual"
     s = json.loads((tmp_path / "dotclaude" / "settings.json").read_text())
     assert claude.MARK in s["statusLine"]["command"]
     assert claude.RULES_BEGIN in (tmp_path / "dotclaude" / "CLAUDE.md").read_text()
@@ -32,7 +33,7 @@ def test_setup_defaults_on_24gb(tmp_path, monkeypatch):
 
 
 def test_setup_custom_answers(tmp_path, monkeypatch):
-    _env(tmp_path, monkeypatch, ["gpt-oss:20b"])
+    _env(tmp_path, monkeypatch, ["gpt-oss:20b"], ram=48.0)
     lines = []
     rc = setup.run(tmp_path, answers={"use_recommended": "n", "model_choice": "2", "threshold": "85", "scope": "here", "takeover": "2", "report": "n"},
                    out=lines.append, pull=lambda m: 1, claude_version=lambda: "2.1.322", bin_dir=tmp_path / "bin",
@@ -46,7 +47,7 @@ def test_setup_custom_answers(tmp_path, monkeypatch):
 
 
 def test_setup_stops_on_old_claude_or_no_ollama(tmp_path, monkeypatch):
-    _env(tmp_path, monkeypatch, ["nemotron-3.5-lightning:30b-a3b-mlx"])
+    _env(tmp_path, monkeypatch, ["nemotron-3.5-bolt:e4b"])
     lines = []
     assert setup.run(tmp_path, answers={}, out=lines.append, claude_version=lambda: "2.1.100", bin_dir=tmp_path / "b") == 1
     assert "claude update" in lines[-1]

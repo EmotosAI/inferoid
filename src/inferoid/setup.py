@@ -81,13 +81,15 @@ def run(project: Path, answers: dict[str, str] | None = None, out: Callable[[str
     # 1. machine and model
     mem = machine_memory()
     chip = platform.processor() or platform.machine()
-    budget = claude.gpu_budget(mem)
+    budget = claude.default_budget(mem)
+    cap = claude.context_for(mem)
     model, gb = claude.pick_model(mem)
-    out(f"This machine: {chip}, {mem.get('ram_gb', 0):.0f} GB memory ({budget:.0f} GB usable by the GPU).")
+    out(f"This machine: {chip}, {mem.get('ram_gb', 0):.0f} GB memory ({budget:.0f} GB usable by the GPU by default).")
+    out(f"Safe setup for it: models that fit that budget, and a {cap:,}-token context cap so the Mac never runs out of memory.")
     out(f"Recommended model: {claude.model_label(model)} ({model}, ~{gb:.0f} GB): "
         + next((why for m, _, why in CHOICES if m == model), "best fit for this memory"))
     if not p.yes("use_recommended", "Use it?"):
-        fits = [c for c in CHOICES if mem.get("ram_gb", 0) >= c[1]] or CHOICES[-1:]
+        fits = [c for c in CHOICES if claude.fits_safely(c[0], MODEL_GB.get(c[0], 0.0), mem)] or CHOICES[-1:]
         for i, (m, _, why) in enumerate(fits, 1):
             out(f"  {i}. {claude.model_label(m)} ({m}): {why}")
         pick = p.ask("model_choice", "Pick a number, or type any Ollama model name", "1")
@@ -111,21 +113,25 @@ def run(project: Path, answers: dict[str, str] | None = None, out: Callable[[str
             return 1
     else:
         out(f"Skipped. Download it later with: ollama pull {model}")
-    ctx = os.environ.get("OLLAMA_CONTEXT_LENGTH") or claude._launchctl("OLLAMA_CONTEXT_LENGTH")
-    if (not ctx or int(ctx) < claude.LOCAL_CONTEXT) and platform.system() == "Darwin":
-        if p.yes("context", "Claude Code needs a 64K context in Ollama. Set it now and restart the Ollama app?"):
-            subprocess.call(["launchctl", "setenv", "OLLAMA_CONTEXT_LENGTH", str(claude.LOCAL_CONTEXT)])
-            if not claude.restart_ollama():
-                out("Quit and reopen the Ollama app so it picks up the 64K context.")
-    elif not ctx or int(ctx) < claude.LOCAL_CONTEXT:
-        out(f"Start Ollama with OLLAMA_CONTEXT_LENGTH={claude.LOCAL_CONTEXT} (Claude Code's own instructions are ~20K tokens).")
+    # Ollama: context cap for this Mac, one model at a time, unload after 10 idle minutes.
+    wanted_env = {"OLLAMA_CONTEXT_LENGTH": str(cap), "OLLAMA_MAX_LOADED_MODELS": "1", "OLLAMA_KEEP_ALIVE": "10m"}
+    current = {k: os.environ.get(k) or claude._launchctl(k) for k in wanted_env}
+    if current != wanted_env:
+        if platform.system() == "Darwin":
+            if p.yes("context", f"Set Ollama to a {cap:,}-token context, one model loaded at a time, and unload after 10 idle minutes "
+                               "(restarts the Ollama app)?"):
+                for key, value in wanted_env.items():
+                    subprocess.call(["launchctl", "setenv", key, value])
+                if not claude.restart_ollama():
+                    out("Quit and reopen the Ollama app so it picks up these settings.")
+        else:
+            out("Start Ollama with " + " ".join(f"{k}={v}" for k, v in wanted_env.items()))
 
-    want = claude.gpu_limit_needed(gb, mem)
-    if want:
-        out(f"\n{claude.model_label(model)} needs ~{gb:.0f} GB of GPU memory, and macOS lets the GPU use {budget:.0f} GB, "
-            "so Ollama would refuse to load it.")
-        if not (gpu_raiser or claude.raise_gpu_limit)(want, lambda q: p.yes("gpu_limit", q)):
-            out(f"Not changed. claude-local will offer this again, or run: sudo sysctl iogpu.wired_limit_mb={want}")
+    problem = claude.memory_problem(model, gb, mem)
+    if problem:
+        out("\nMemory: " + problem)
+        if gpu_raiser and claude.gpu_limit_needed(model, gb, mem):
+            gpu_raiser(claude.gpu_limit_needed(model, gb, mem), lambda q: p.yes("gpu_limit", q, default=False))
 
     # 3. coding agent
     out("\nWhich coding agent do you use?\n  1. Claude Code\n  (Codex, Cursor, Hermes and OpenClaw: coming soon)")
