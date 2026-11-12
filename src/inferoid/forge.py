@@ -68,14 +68,28 @@ def logout() -> str:
     return "Forge token removed."
 
 
+def _user_agent() -> str:
+    from importlib.metadata import PackageNotFoundError, version
+
+    try:
+        return f"inferoid/{version('inferoid')}"
+    except PackageNotFoundError:
+        return "inferoid/dev"
+
+
 def _health(url: str) -> str:
     try:
         url = validate_url(url)
-        with urllib.request.urlopen(url.rstrip("/") + "/healthz", timeout=10) as response:
+        request = urllib.request.Request(url.rstrip("/") + "/healthz", headers={"User-Agent": _user_agent()})
+        with urllib.request.urlopen(request, timeout=10) as response:
             response.read()
         return "ok"
-    except (OSError, urllib.error.URLError, urllib.error.HTTPError) as exc:
-        return f"unavailable ({type(exc).__name__})"
+    except urllib.error.HTTPError as exc:
+        return f"unavailable (HTTP {exc.code})"
+    except urllib.error.URLError as exc:
+        return f"unavailable ({exc.reason})"
+    except OSError as exc:
+        return f"unavailable ({type(exc).__name__}: {exc})"
 
 
 def status() -> list[str]:
@@ -168,7 +182,8 @@ def submit(data: dict[str, Any], token: str | None = None, url: str | None = Non
     body = json.dumps(allowlisted_report(data), ensure_ascii=False).encode()
     request = urllib.request.Request(target + "/api/v1/reports", data=body, method="POST",
                                      headers={"Authorization": f"Bearer {token}",
-                                              "Content-Type": "application/json"})
+                                              "Content-Type": "application/json",
+                                              "User-Agent": _user_agent()})
     try:
         with urllib.request.urlopen(request, timeout=10) as response:
             raw = response.read()
@@ -182,4 +197,4 @@ def submit(data: dict[str, Any], token: str | None = None, url: str | None = Non
             return False, "Forge rejected the token (HTTP 401).", None
         return False, f"Forge returned HTTP {exc.code}.", None
     except (OSError, urllib.error.URLError, ValueError) as exc:
-        return False, f"Forge submission failed ({type(exc).__name__}).", None
+        return False, f"Forge submission failed ({type(exc).__name__}: {exc}).", None
