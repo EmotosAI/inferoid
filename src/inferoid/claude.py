@@ -305,9 +305,7 @@ def preflight(model: str, model_gb: float, memory: dict[str, float]) -> list[str
     if ctx and ctx.isdigit() and int(ctx) > cap:
         notes.append(f"memory: Ollama's context is {int(ctx):,} tokens, above the safe {cap:,} for this Mac. Run inferoid setup, or: "
                      f"launchctl setenv OLLAMA_CONTEXT_LENGTH {cap}, then quit and reopen Ollama.")
-    elif not ctx or (ctx.isdigit() and int(ctx) < cap):
-        notes.append(f"hint: set Ollama's context to {cap:,} tokens for Claude Code: launchctl setenv OLLAMA_CONTEXT_LENGTH {cap}, "
-                     "then quit and reopen Ollama.")
+    # A smaller Ollama default is fine: the session uses a -ctx copy with the context baked in.
     problem = memory_problem(model, model_gb, memory)
     if problem:
         notes.append("memory: " + problem)
