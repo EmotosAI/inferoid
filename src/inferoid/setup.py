@@ -114,7 +114,10 @@ def configure_codex(home: Path | None = None, out: Callable[[str], None] = print
     if re.search(r"(?m)^\[mcp_servers\.inferoid\]\s*$", text):
         out(f"Codex already has inferoid in {path}")
         return True
-    block = '[mcp_servers.inferoid]\ncommand = "inferoid"\nargs = ["mcp"]\n'
+    # tool_timeout_sec: local runs take minutes. default_tools_approval_mode: `codex exec` refuses MCP calls that
+    # need approval ("MCP tool call requires approval, but approval policy is never"), so local_agent is pre-approved.
+    block = ('[mcp_servers.inferoid]\ncommand = "inferoid"\nargs = ["mcp"]\ntool_timeout_sec = 1000\n'
+             'default_tools_approval_mode = "approve"\n')
     path.write_text(text.rstrip() + ("\n\n" if text.strip() else "") + block)
     out(f"Added inferoid to {path}")
     return True
