@@ -20,7 +20,7 @@ from typing import Any
 from . import __version__, claude, forge
 from .night import gpu_budget_gb, machine_memory
 
-SAMPLE_INTERVAL = 5.0
+SAMPLE_INTERVAL = 2.0  # often enough to stop a run before macOS stalls
 BASH_PATTERNS = ("python", "python3", "pytest", "ls", "cat", "head", "tail", "wc", "grep", "find", "git status", "git diff")
 
 
@@ -147,23 +147,44 @@ class Monitor:
         self.weights = 0.0
         self.start_swap = swap_used_gb()
         self.danger = ""  # set when the run must stop to protect the Mac
+        self.limit = 0.0  # macOS's default GPU budget; set by the caller
+        self.last_sample = 0.0
+        self.max_gap = 0.0
+        self.last_model = 0.0
 
     def sample(self) -> None:
+        now = time.monotonic()
+        gap = now - self.last_sample if self.last_sample else 0.0
+        self.last_sample = now
+        self.max_gap = max(self.max_gap, gap)
         reported = loaded_model_memory(self.model)
         if self.baseline and self.weights and reported < self.weights * 0.9:
             # Ollama under-reports some models (gemma4); count what the system actually lost since before the load.
             reported = max(reported, claude.loaded_footprint_gb(self.weights, claude.system_used_gb() - self.baseline))
+        jump = reported - self.last_model if self.last_model else 0.0
+        self.last_model = reported
         self.peak_model = max(self.peak_model, reported)
-        self.peak_swap = max(self.peak_swap, swap_used_gb())
-        levels = {"normal": 0, "warn": 1, "critical": 2}
+        swap = swap_used_gb()
+        growth = max(0.0, swap - self.start_swap)
+        self.peak_swap = max(self.peak_swap, growth)  # swap added during the run, not swap left from earlier
         current = memory_pressure()
+        if growth > SWAP_STOP_GB or gap > STALL_GAP_S:
+            current = "critical"
+        elif growth > 0.5 and current == "normal":
+            current = "warn"
+        levels = {"normal": 0, "warn": 1, "critical": 2}
         if levels.get(current, 0) > levels.get(self.pressure, 0):
             self.pressure = current
-        swap = swap_used_gb()
-        if current == "critical":
+        if gap > STALL_GAP_S:
+            self.danger = f"the Mac stalled for {gap:.0f} s between memory samples"
+        elif growth > SWAP_STOP_GB:
+            self.danger = f"swap grew by {growth:.1f} GB during the run"
+        elif self.limit and reported > self.limit:
+            self.danger = f"model memory {reported:.1f} GB is over the {self.limit:.1f} GB GPU budget"
+        elif jump > JUMP_STOP_GB:
+            self.danger = f"model memory jumped by {jump:.1f} GB in {gap:.0f} s (a reload or second copy?)"
+        elif current == "critical":
             self.danger = "memory pressure critical"
-        elif swap - self.start_swap > SWAP_STOP_GB:
-            self.danger = f"swap grew by {swap - self.start_swap:.1f} GB"
 
     def _run(self) -> None:
         self.sample()
@@ -339,17 +360,20 @@ def _consume_stream(line: str, state: dict[str, Any], start: float) -> None:
                 state[key] = max(state[key], int(value))
 
 
-SWAP_STOP_GB = 3.0  # stop a run when swap grows this much beyond where it started
+SWAP_STOP_GB = 1.0  # stop a run when swap grows this much beyond where it started
+STALL_GAP_S = 10.0  # a gap this long between 2-second samples means macOS is stalling
+JUMP_STOP_GB = 2.5  # model memory growing this fast is a reload or second copy, not the context filling
 STALL_S = 600  # no finished reply for 10 minutes = runaway; MAX_REPLY_TOKENS normally ends a reply well before
 
 
 def run_claude(args: list[str], env: dict[str, str], worktree: Path, model: str, timeout: int, context: int,
-               transcript: Path | None = None, baseline: float = 0.0) -> dict[str, Any]:
+               transcript: Path | None = None, baseline: float = 0.0, limit: float = 0.0) -> dict[str, Any]:
     state: dict[str, Any] = {"first_reply_s": None, "turns": 0, "tool_calls": 0,
                              "input_tokens": 0, "output_tokens": 0, "result_seen": False, "errors": []}
     started = time.monotonic()
     monitor = Monitor(model)
     monitor.baseline, monitor.weights = baseline, (claude.weights_gb(model) if baseline else 0.0)
+    monitor.limit = limit
     lines: queue.Queue[str | None] = queue.Queue()
     process = subprocess.Popen(args, cwd=worktree, env=env, stdin=subprocess.DEVNULL,
                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
@@ -412,8 +436,41 @@ def run_claude(args: list[str], env: dict[str, str], worktree: Path, model: str,
     state.update({"timed_out": timed_out, "returncode": process.returncode,
                   "wall_s": max(0.0, time.monotonic() - started),
                   "peak_model_mem_gb": monitor.peak_model, "peak_swap_gb": monitor.peak_swap,
-                  "memory_pressure": monitor.pressure})
+                  "memory_pressure": monitor.pressure, "max_sample_gap_s": round(monitor.max_gap, 1)})
+    if monitor.max_gap > STALL_GAP_S:
+        state["errors"].append(f"the Mac stalled for {monitor.max_gap:.0f} s during the run")
     return state
+
+
+def _outbox() -> Path:
+    return home() / "bench" / "outbox"
+
+
+def queue_for_forge(path: Path) -> None:
+    """Keep a report that could not be sent; flush_outbox() resends it at the start of the next bench."""
+    try:
+        _outbox().mkdir(parents=True, exist_ok=True)
+        (_outbox() / path.name).write_text(str(path))
+        print("Queued for Forge; it is resent at the start of the next bench (or: inferoid bench submit FILE).")
+    except OSError:
+        pass
+
+
+def flush_outbox() -> None:
+    config = forge.read_config()
+    if not (config.get("share_reports") and config.get("forge_token")) or not _outbox().exists():
+        return
+    for entry in sorted(_outbox().iterdir()):
+        try:
+            report_path = Path(entry.read_text().strip())
+            ok, message, _ = forge.submit(json.loads(report_path.read_text()))
+        except (OSError, ValueError) as exc:
+            ok, message = False, str(exc)
+        if ok:
+            entry.unlink(missing_ok=True)
+            print(f"Sent a queued report to Forge: {report_path.name}")
+        elif "401" in message:
+            break
 
 
 def classify_failure(state: dict[str, Any], check_passed: bool, changed: bool, context: int) -> str:
@@ -491,6 +548,8 @@ def run(project: Path, brief_file: Path, check: str, pack: str, task: str, kind:
         context: str | None = None) -> tuple[int, Path]:
     project = project.resolve()
     brief = brief_file.read_text()
+    if not no_submit:
+        flush_outbox()  # reports that could not be sent last time (e.g. the network was down during a stall)
     memory = machine_memory()
     saved = forge.read_config().get("model")
     picked, picked_gb = claude.pick_model(memory)
@@ -541,7 +600,8 @@ def run(project: Path, brief_file: Path, check: str, pack: str, task: str, kind:
             transcript = home() / "bench" / "transcripts" / f"{run_id}.jsonl"
             transcript.parent.mkdir(parents=True, exist_ok=True)
             transcript.touch(mode=0o600)
-            state = run_claude(args, env, worktree, engine_model, timeout, cap, transcript, baseline=baseline)
+            state = run_claude(args, env, worktree, engine_model, timeout, cap, transcript, baseline=baseline,
+                               limit=claude.default_budget(memory))
             print(f"Transcript (kept on this machine, never sent): {transcript}")
             limit = claude.default_budget(memory) - claude.PROBE_MARGIN_GB
             if state.get("memory_stop") or float(state.get("peak_model_mem_gb", 0)) > limit:
@@ -611,8 +671,11 @@ def run(project: Path, brief_file: Path, check: str, pack: str, task: str, kind:
                 report["verdict"] = verdict
                 write_report(report, path)
             print(("Forge verdict: " + json.dumps(verdict, sort_keys=True)) if ok and verdict else message)
+            if not ok:
+                queue_for_forge(path)
         except (OSError, TypeError, ValueError) as exc:  # submission must never invalidate a local benchmark
             print(f"Forge submission failed ({type(exc).__name__}); the local report was kept.")
+            queue_for_forge(path)
     return (130 if state.get("interrupted") else 0), path
 
 

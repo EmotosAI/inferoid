@@ -91,7 +91,7 @@ def test_run_uses_and_removes_worktree_without_touching_repo(tmp_path, monkeypat
     monkeypatch.setattr(claude, "ensure_loaded", lambda model: "")
     monkeypatch.setattr(bench, "_engine_version", lambda: "test")
 
-    def fake_run(args, env, worktree, model, timeout, context, transcript=None, baseline=0.0):
+    def fake_run(args, env, worktree, model, timeout, context, transcript=None, baseline=0.0, limit=0.0):
         (worktree / "done.txt").write_text("done\n")
         return {"first_reply_s": 0.1, "turns": 1, "tool_calls": 1, "input_tokens": 2, "output_tokens": 3,
                 "result_seen": True, "errors": [], "timed_out": False, "returncode": 0, "wall_s": 0.2,
@@ -308,3 +308,54 @@ def test_memory_danger_stops_the_run(monkeypatch, tmp_path):
     state = bench.run_claude([str(script)], dict(os.environ), tmp_path, "m", 60, 32768)
     assert state["memory_stop"]
     assert bench.classify_failure(state, False, False, 32768) == "out_of_memory"
+
+
+def _monitor(monkeypatch, swaps, model_gb=11.0, pressure="normal"):
+    seq = iter(swaps)
+    monkeypatch.setattr(bench, "swap_used_gb", lambda: next(seq))
+    monkeypatch.setattr(bench, "loaded_model_memory", lambda m: model_gb)
+    monkeypatch.setattr(bench, "memory_pressure", lambda: pressure)
+    return bench.Monitor("m")
+
+
+def test_monitor_judges_swap_growth_not_leftover(monkeypatch):
+    m = _monitor(monkeypatch, [2.15, 2.15, 2.18])  # start, then samples: 2.15 GB was there before the run
+    m.sample(); m.sample()
+    assert m.peak_swap < 0.1 and m.pressure == "normal" and not m.danger
+
+
+def test_monitor_stops_on_1gb_swap_growth_and_stalls(monkeypatch):
+    m = _monitor(monkeypatch, [2.0, 3.3])
+    m.sample()
+    assert "swap grew" in m.danger and m.pressure == "critical"
+    m = _monitor(monkeypatch, [2.0, 2.0, 2.0])
+    m.sample()
+    m.last_sample -= 30  # 30 s with no sample = macOS stalled
+    m.sample()
+    assert "stalled" in m.danger
+
+
+def test_monitor_stops_over_budget_and_on_jumps(monkeypatch):
+    m = _monitor(monkeypatch, [0.0, 0.0], model_gb=17.0)
+    m.limit = 16.1
+    m.sample()
+    assert "over the 16.1 GB" in m.danger
+    m = _monitor(monkeypatch, [0.0, 0.0, 0.0], model_gb=11.0)
+    m.limit = 16.1
+    m.sample()
+    monkeypatch.setattr(bench, "loaded_model_memory", lambda x: 14.0)
+    m.sample()
+    assert "jumped" in m.danger
+
+
+def test_failed_submit_is_queued_and_resent(monkeypatch, tmp_path):
+    monkeypatch.setenv("INFEROID_HOME", str(tmp_path))
+    monkeypatch.setattr(bench, "home", lambda: tmp_path)
+    report = tmp_path / "r.json"
+    report.write_text(json.dumps({"schema": 1}))
+    bench.queue_for_forge(report)
+    assert (tmp_path / "bench" / "outbox" / "r.json").exists()
+    monkeypatch.setattr(bench.forge, "read_config", lambda: {"share_reports": True, "forge_token": "t"})
+    monkeypatch.setattr(bench.forge, "submit", lambda data: (True, "ok", None))
+    bench.flush_outbox()
+    assert not (tmp_path / "bench" / "outbox" / "r.json").exists()

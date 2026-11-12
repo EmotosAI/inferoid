@@ -25,7 +25,7 @@ Privacy rule: metrics only. No prompts, code, file contents, model outputs, path
     "input_tokens": 41200,
     "output_tokens": 3900,
     "peak_model_mem_gb": 9.1,
-    "peak_swap_gb": 0.0,
+    "peak_swap_gb": 0.0,  # swap ADDED during the run (from 0.1.16); swap left from earlier does not count
     "memory_pressure": "normal | warn | critical"
   },
   "reference": {"model": "gpt-5.6-luna", "status": "pass", "wall_s": 300, "tool_calls": 19}
