@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import argparse
-import sys
 import json
 import os
+import sys
+from pathlib import Path
 
 from . import APP_NAME
 from .analysis import classify, machine
@@ -110,6 +111,23 @@ def build_parser() -> argparse.ArgumentParser:
     night_cmds.choices["schedule"].add_argument("--at", default="01:00", help="HH:MM local time")
     st = commands.add_parser("setup", help="Pick and download a local model and connect it to your coding agent")
     st.add_argument("--project", default=".")
+    st.add_argument("--supervisor", choices=("claude", "codex", "cursor", "all"))
+    run_local = commands.add_parser("run", help="Delegate one checked chore to the local model")
+    run_local.add_argument("task")
+    run_local.add_argument("--check")
+    run_local.add_argument("--files", action="append", default=[])
+    run_local.add_argument("--model")
+    run_local.add_argument("--engine", choices=("ollama", "openai"), default="ollama")
+    run_local.add_argument("--engine-url", default="http://127.0.0.1:8080")
+    run_local.add_argument("--engine-model")
+    run_local.add_argument("--context")
+    run_local.add_argument("--timeout", type=int, default=900)
+    run_local.add_argument("--max-turns", type=int, default=200)
+    run_local.add_argument("--allow-bash", action="append", default=[])
+    run_local.add_argument("--deny-tool", action="append", default=[])
+    run_local.add_argument("--share", action="store_true", help="Submit a metrics-only report to Forge")
+    run_local.add_argument("--json", action="store_true")
+    commands.add_parser("mcp", help="Run the stdio MCP server")
     bench = commands.add_parser("bench", help="Run isolated Claude Code benchmarks on local models")
     bench_cmds = bench.add_subparsers(dest="bench_command", required=True)
     run_bench = bench_cmds.add_parser("run")
@@ -200,11 +218,40 @@ def main(argv: list[str] | None = None) -> int:
     elif args.command == "claude":
         return claude_main(args)
     elif args.command == "setup":
-        from pathlib import Path
-
         from .setup import run
 
-        return run(Path(args.project).resolve())
+        return run(Path(args.project).resolve(), supervisor=args.supervisor)
+    elif args.command == "run":
+        from .dispatch import run_task
+
+        value = run_task(project=Path.cwd(), task=args.task, check=args.check, files=args.files, model=args.model,
+                         engine=args.engine, engine_url=args.engine_url, engine_model=args.engine_model,
+                         context=args.context, timeout=args.timeout, max_turns=args.max_turns,
+                         allow_bash=args.allow_bash, deny_tools=args.deny_tool, share=args.share)
+        if args.share and value.get("_report"):
+            from . import forge
+
+            metrics_report = value.pop("_report")
+            try:
+                ok, message, verdict = forge.submit(metrics_report)
+                value.setdefault("notes", []).append(message if not ok else "Metrics report submitted")
+                if verdict:
+                    value["verdict"] = verdict
+            except (OSError, TypeError, ValueError) as exc:
+                value.setdefault("notes", []).append(f"Metrics report could not be submitted: {exc}")
+        value.pop("_report", None)
+        if args.json:
+            print(json.dumps(value, sort_keys=True))
+        else:
+            print(f"{value['status']}: {len(value.get('files_changed', []))} file(s), {value.get('wall_s', 0):.1f}s")
+            if value.get("notes"):
+                print("; ".join(value["notes"][-3:]))
+        return 0 if value.get("status") == "done" else 1
+    elif args.command == "mcp":
+        from .mcp import serve
+
+        serve()
+        return 0
     elif args.command == "bench":
         import signal
 
@@ -212,8 +259,6 @@ def main(argv: list[str] | None = None) -> int:
             raise KeyboardInterrupt
         for sig in (signal.SIGTERM, signal.SIGHUP):
             signal.signal(sig, stop)
-        from pathlib import Path
-
         from . import bench
 
         if args.bench_command == "run":

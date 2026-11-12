@@ -10,7 +10,8 @@ import subprocess
 import sys
 import time
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
+from collections.abc import Callable
 
 from . import claude
 from .night import machine_memory
@@ -23,6 +24,14 @@ CHOICES = [
     ("nemotron-3.5-bolt:e4b", 8, "for 16 GB Macs"),
 ]
 MODEL_GB = claude.MODEL_GB
+
+SUPERVISOR_SNIPPET = [
+    "When to delegate: multi-step mechanical edits, test fixing, or data wrangling with a checkable result.",
+    "How to brief: give one concrete goal, the exact files, and a shell check that proves success.",
+    "After it returns: review the diff and run the check yourself before accepting the work.",
+    "Never delegate secrets, credentials, private keys, or files containing them.",
+    "Put these five lines in AGENTS.md or CLAUDE.md so the supervisor knows the local path.",
+]
 
 
 def config_path() -> Path:
@@ -72,9 +81,90 @@ def _build_report() -> str:
     return buf.getvalue().strip() + "\nFull report: ~/.inferoid/report.html"
 
 
+def _backup(path: Path) -> None:
+    if path.exists():
+        shutil.copy2(path, path.with_name(path.name + ".inferoid-bak"))
+
+
+def configure_claude(path: Path | None = None, out: Callable[[str], None] = print,
+                     runner: Callable[..., Any] | None = None) -> bool:
+    command = ["claude", "mcp", "add", "--scope", "user", "inferoid", "--", "inferoid", "mcp"]
+    rendered = " ".join(command)
+    if not shutil.which("claude"):
+        out("Claude Code was not found. Run: " + rendered)
+        return False
+    try:
+        result = (runner or subprocess.run)(command, capture_output=True, text=True, check=False)
+    except (OSError, subprocess.SubprocessError):
+        out("Claude Code MCP registration failed. Run: " + rendered)
+        return False
+    if getattr(result, "returncode", 1) != 0:
+        out("Claude Code MCP registration failed. Run: " + rendered)
+        return False
+    out("Claude Code now has the inferoid local_agent tool.")
+    return True
+
+
+def configure_codex(home: Path | None = None, out: Callable[[str], None] = print) -> bool:
+    root = home or Path.home()
+    path = root / ".codex" / "config.toml"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    _backup(path)
+    text = path.read_text() if path.exists() else ""
+    if re.search(r"(?m)^\[mcp_servers\.inferoid\]\s*$", text):
+        out(f"Codex already has inferoid in {path}")
+        return True
+    block = '[mcp_servers.inferoid]\ncommand = "inferoid"\nargs = ["mcp"]\n'
+    path.write_text(text.rstrip() + ("\n\n" if text.strip() else "") + block)
+    out(f"Added inferoid to {path}")
+    return True
+
+
+def configure_cursor(home: Path | None = None, out: Callable[[str], None] = print) -> bool:
+    root = home or Path.home()
+    path = root / ".cursor" / "mcp.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    _backup(path)
+    try:
+        data = json.loads(path.read_text()) if path.exists() else {}
+    except (OSError, ValueError) as exc:
+        out(f"Cursor MCP configuration is not valid JSON: {exc}")
+        return False
+    if not isinstance(data, dict):
+        data = {}
+    servers = data.setdefault("mcpServers", {})
+    if not isinstance(servers, dict):
+        out(f"Cursor MCP configuration has a non-object mcpServers in {path}")
+        return False
+    if "inferoid" not in servers:
+        servers["inferoid"] = {"command": "inferoid", "args": ["mcp"]}
+        path.write_text(json.dumps(data, indent=2) + "\n")
+        out(f"Added inferoid to {path}")
+    else:
+        out(f"Cursor already has inferoid in {path}")
+    return True
+
+
+def configure_supervisors(supervisor: str, home: Path | None = None,
+                          out: Callable[[str], None] = print) -> None:
+    if supervisor not in {"claude", "codex", "cursor", "all"}:
+        raise ValueError("supervisor must be claude, codex, cursor, or all")
+    targets = ("claude", "codex", "cursor") if supervisor == "all" else (supervisor,)
+    if "claude" in targets:
+        configure_claude(out=out)
+    if "codex" in targets:
+        configure_codex(home=home, out=out)
+    if "cursor" in targets:
+        configure_cursor(home=home, out=out)
+    out("\nSupervisor guidance snippet for AGENTS.md or CLAUDE.md:")
+    for line in SUPERVISOR_SNIPPET:
+        out(line)
+
+
 def run(project: Path, answers: dict[str, str] | None = None, out: Callable[[str], None] = print,
         pull: Callable[[str], int] | None = None, claude_version: Callable[[], str] | None = None,
-        bin_dir: Path | None = None, gpu_raiser: Callable | None = None, reporter: Callable[[], str] | None = None) -> int:
+        bin_dir: Path | None = None, gpu_raiser: Callable | None = None, reporter: Callable[[], str] | None = None,
+        supervisor: str | None = None) -> int:
     p = Prompter(answers, out)
     out("Inferoid setup: a free local model for the work your paid agent doesn't need to do.\n")
 
@@ -134,36 +224,43 @@ def run(project: Path, answers: dict[str, str] | None = None, out: Callable[[str
             gpu_raiser(claude.gpu_limit_needed(model, gb, mem), lambda q: p.yes("gpu_limit", q, default=False))
 
     # 3. coding agent
-    out("\nWhich coding agent do you use?\n  1. Claude Code\n  (Codex, Cursor, Hermes and OpenClaw: coming soon)")
-    if p.ask("harness", "Pick a number", "1") != "1":
-        out("Only Claude Code is supported in this version.")
-        return 1
-    version = (claude_version or (lambda: subprocess.run(["claude", "--version"], capture_output=True, text=True).stdout))() if (claude_version or shutil.which("claude")) else ""
-    if not version:
-        out("Claude Code is not installed. Install it from https://code.claude.com, then run inferoid setup again.")
-        return 1
-    if _version(version) < MIN_CLAUDE:
-        out(f"Claude Code {version.strip()} is too old for the local model list. Run: claude update")
-        return 1
+    if supervisor and supervisor != "claude":
+        out(f"\nSupervisor selected: {supervisor}. Claude Code handoff settings are not needed for this supervisor.")
+        version = ""
+    else:
+        out("\nWhich coding agent do you use?\n  1. Claude Code\n  (Codex, Cursor, Hermes and OpenClaw: coming soon)")
+        if p.ask("harness", "Pick a number", "1") != "1":
+            out("Only Claude Code is supported in this version.")
+            return 1
+        version = (claude_version or (lambda: subprocess.run(["claude", "--version"], capture_output=True, text=True).stdout))() if (claude_version or shutil.which("claude")) else ""
+        if not version:
+            out("Claude Code is not installed. Install it from https://code.claude.com, then run inferoid setup again.")
+            return 1
+        if _version(version) < MIN_CLAUDE:
+            out(f"Claude Code {version.strip()} is too old for the local model list. Run: claude update")
+            return 1
 
     # 4. settings
-    out("\nHandoff settings")
-    handoff = p.yes("handoff", "Have Claude keep a HANDOFF.md plan (goal, steps, test command) so the local model can take over?")
-    threshold = 90.0
-    if handoff:
-        raw = p.ask("threshold", "At what usage % should Claude update HANDOFF.md first? (5-hour or weekly limit)", "90")
-        threshold = float(raw) if raw.replace(".", "", 1).isdigit() and 0 < float(raw) <= 100 else 90.0
-    scope = p.ask("scope", "Apply to all projects or only this folder? (all/here)", "all").lower()
-    global_ = not scope.startswith("h")
-    out("When Claude reaches its limit:\n  1. Tell me, and I switch with one command (claude-local)\n"
-        "  2. Switch automatically (needs a local relay that carries your Claude login; off by default, coming soon)")
-    takeover = p.ask("takeover", "Pick a number", "1")
-    if takeover != "1":
-        out("Automatic switching is not in this version yet. Using option 1.")
+    if supervisor and supervisor != "claude":
+        handoff, threshold, global_, takeover, report_now = False, 90.0, False, "1", False
+    else:
+        out("\nHandoff settings")
+        handoff = p.yes("handoff", "Have Claude keep a HANDOFF.md plan (goal, steps, test command) so the local model can take over?")
+        threshold = 90.0
+        if handoff:
+            raw = p.ask("threshold", "At what usage % should Claude update HANDOFF.md first? (5-hour or weekly limit)", "90")
+            threshold = float(raw) if raw.replace(".", "", 1).isdigit() and 0 < float(raw) <= 100 else 90.0
+        scope = p.ask("scope", "Apply to all projects or only this folder? (all/here)", "all").lower()
+        global_ = not scope.startswith("h")
+        out("When Claude reaches its limit:\n  1. Tell me, and I switch with one command (claude-local)\n"
+            "  2. Switch automatically (needs a local relay that carries your Claude login; off by default, coming soon)")
+        takeover = p.ask("takeover", "Pick a number", "1")
+        if takeover != "1":
+            out("Automatic switching is not in this version yet. Using option 1.")
 
-    out("\nUsage report: shows where your Claude limit goes (by task and step) and what the local model saved. "
-        "It reads the Claude Code and Codex logs already on this Mac; nothing leaves it.")
-    report_now = p.yes("report", "Build it now?")
+        out("\nUsage report: shows where your Claude limit goes (by task and step) and what the local model saved. "
+            "It reads the Claude Code and Codex logs already on this Mac; nothing leaves it.")
+        report_now = p.yes("report", "Build it now?")
 
     # 5. apply
     applied = []
@@ -174,7 +271,8 @@ def run(project: Path, answers: dict[str, str] | None = None, out: Callable[[str
     launcher = bin_dir / LAUNCHER
     launcher.write_text(f'#!/bin/sh\nexec "{sys.executable}" -m inferoid claude local "$@"\n')
     launcher.chmod(0o755)
-    cfg: dict[str, Any] = {"model": model, "harness": "claude-code", "handoff": handoff, "threshold": threshold,
+    harness_name = "Claude Code" if not supervisor or supervisor == "claude" else supervisor.title()
+    cfg: dict[str, Any] = {"model": model, "harness": harness_name.lower().replace(" ", "-"), "handoff": handoff, "threshold": threshold,
                            "scope": "all projects" if global_ else str(project), "takeover": "manual", "launcher": str(launcher),
                            "set_up_at": time.strftime("%Y-%m-%d %H:%M")}
     config_path().write_text(json.dumps(cfg, indent=2) + "\n")
@@ -188,7 +286,7 @@ def run(project: Path, answers: dict[str, str] | None = None, out: Callable[[str
     # 6. summary
     out("\nYou're all set.\n")
     out(f"  Local model     {claude.model_label(model)} ({model})")
-    out("  Coding agent    Claude Code")
+    out(f"  Coding agent    {harness_name}")
     out(f"  Handoff plan    {'on: Claude keeps HANDOFF.md' if handoff else 'off'}")
     if handoff:
         out(f"  Reminder at     {threshold:.0f}% of the 5-hour or weekly limit")
@@ -197,10 +295,15 @@ def run(project: Path, answers: dict[str, str] | None = None, out: Callable[[str
     out("  Usage report    inferoid scan && inferoid report")
     out("\nHow to use it:")
     out("  claude            work as usual with Opus or Sonnet" + (f"; at {threshold:.0f}% Claude updates HANDOFF.md" if handoff else ""))
-    out(f"  claude-local      Claude Code on {claude.model_label(model)}, free; /model shows it as \"(local, free)\"")
+    out(f"  claude-local      local model on {claude.model_label(model)}, free; /model shows it as \"(local, free)\"")
     out("  inferoid claude status   usage, reset time, HANDOFF.md state")
     if str(bin_dir) not in os.environ.get("PATH", "").split(os.pathsep):
         out(f"\nAdd {bin_dir} to your PATH to use claude-local:  echo 'export PATH=\"{bin_dir}:$PATH\"' >> ~/.zshrc")
     if handoff:
         out("\nRestart Claude Code so it loads the new settings.")
+    chosen_supervisor = supervisor
+    if chosen_supervisor is None and answers is None:
+        chosen_supervisor = p.ask("supervisor", "Connect a supervisor now? (claude/codex/cursor/all)", "claude").lower()
+    if chosen_supervisor:
+        configure_supervisors(chosen_supervisor, out=out)
     return 0
