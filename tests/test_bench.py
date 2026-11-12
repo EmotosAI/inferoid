@@ -209,23 +209,28 @@ def test_no_output_when_agent_did_nothing():
     assert bench.classify_failure(state, check_passed=False, changed=True, context=32768) == "check_failed"
 
 
-def test_context_model_bakes_cap_once(monkeypatch):
+def test_context_model_copies_chat_format(monkeypatch):
     from inferoid import claude
 
     created = []
-    tags = {"models": [{"name": "hf.co/org/LFM2.5-24B-GGUF:Q3_K_S"}]}
+    tags = {"models": [{"name": "gemma4-26b-reap25:latest"}]}
     monkeypatch.setattr(claude, "_ollama", lambda path: tags)
+    base = "FROM /blobs/sha256-abc\nTEMPLATE {{ .Prompt }}\nRENDERER gemma4\nPARSER gemma4\nPARAMETER num_ctx 4096\n"
 
     def fake_run(cmd, **kw):
-        created.append((cmd, open(cmd[-1]).read()))
-        class R: returncode = 0
+        class R:
+            returncode = 0
+            stdout = base if cmd[1] == "show" else ""
+        if cmd[1] == "create":
+            created.append(open(cmd[-1]).read())
         return R()
 
-    name = claude.context_model("hf.co/org/LFM2.5-24B-GGUF:Q3_K_S", 32768, run=fake_run)
-    assert name == "org-lfm2.5-24b-gguf-q3_k_s-ctx32k"
-    assert created and "PARAMETER num_ctx 32768" in created[0][1] and "FROM hf.co/org/LFM2.5-24B-GGUF:Q3_K_S" in created[0][1]
-    tags["models"].append({"name": name + ":latest"})
-    assert claude.context_model("hf.co/org/LFM2.5-24B-GGUF:Q3_K_S", 32768, run=fake_run) == name and len(created) == 1
+    name = claude.context_model("gemma4-26b-reap25", 131072, run=fake_run)
+    assert name == "gemma4-26b-reap25-ctx128k"
+    text = created[0]
+    assert "FROM gemma4-26b-reap25\n" in text and "/blobs/" not in text
+    assert "RENDERER gemma4" in text and "PARSER gemma4" in text
+    assert "num_ctx 4096" not in text and "PARAMETER num_ctx 131072" in text
 
 
 def test_local_errors_stay_local():

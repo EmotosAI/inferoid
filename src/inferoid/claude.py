@@ -596,22 +596,28 @@ def resolve_context(model: str, memory: dict[str, float], context: str | int | N
 
 def context_model(model: str, cap: int, run: Callable[..., Any] = subprocess.run) -> str:
     """Ollama tag with num_ctx baked in. Some models (e.g. hf.co GGUF imports) carry their own num_ctx (often 4096)
-    and Claude Code never sends one, so OLLAMA_CONTEXT_LENGTH alone is not enough. Reuses the same weight blobs."""
+    and Claude Code never sends one, so OLLAMA_CONTEXT_LENGTH alone is not enough. Reuses the same weight blobs.
+    Copies the base model's whole Modelfile (TEMPLATE, RENDERER, PARSER, stop words): a bare FROM can lose the
+    chat format, which leaks thinking markers like <channel|> and breaks tool calls. Rebuilt every time (cheap),
+    so a fixed base model fixes its copies too."""
     base = re.sub(r"[^a-z0-9._-]+", "-", model.lower().removeprefix("hf.co/")).strip("-.")
     name = f"{base}-ctx{cap // 1024}k"
     try:
         names = {m.get("name", "").removesuffix(":latest") for m in _ollama("/api/tags").get("models", [])}
     except OSError:
         return model
-    if name in names:
-        return name
+    shown = run(["ollama", "show", model, "--modelfile"], capture_output=True, text=True)
+    lines = [line for line in (getattr(shown, "stdout", "") or "").splitlines()
+             if not line.startswith("FROM ") and not re.match(r"PARAMETER\s+num_ctx\b", line)]
     import tempfile
 
     with tempfile.TemporaryDirectory() as tmp:
         modelfile = Path(tmp) / "Modelfile"
-        modelfile.write_text(f"FROM {model}\nPARAMETER num_ctx {cap}\n")
+        modelfile.write_text("\n".join([f"FROM {model}", *lines, f"PARAMETER num_ctx {cap}", ""]))
         done = run(["ollama", "create", name, "-f", str(modelfile)], capture_output=True, text=True)
-    return name if getattr(done, "returncode", 1) == 0 else model
+    if getattr(done, "returncode", 1) == 0 or name in names:
+        return name
+    return model
 
 
 def loaded_context(model: str) -> int:
