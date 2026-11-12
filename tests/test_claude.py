@@ -231,3 +231,11 @@ def test_measured_context_is_saved_and_reused(monkeypatch, tmp_path):
 def test_local_env_caps_reply_tokens():
     _, env, _ = claude.local_command(Path("."), "m", False, False, 32768)
     assert env["CLAUDE_CODE_MAX_OUTPUT_TOKENS"] == "8192"
+
+
+def test_over_limit_run_lowers_saved_context(monkeypatch, tmp_path):
+    monkeypatch.setenv("INFEROID_HOME", str(tmp_path))
+    mac = {"ram_gb": 24.0}
+    claude.save_context("m", mac, 131072)
+    assert claude.lower_saved_context("m", mac, 131072) == 98304
+    assert claude.saved_context("m", mac) == 98304

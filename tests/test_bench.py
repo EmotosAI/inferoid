@@ -297,3 +297,14 @@ def test_runaway_reply_is_stopped(monkeypatch, tmp_path):
     state = bench.run_claude([str(script)], dict(os.environ), tmp_path, "m", 60, 32768)
     assert state["stalled"] and not state["timed_out"]
     assert bench.classify_failure(state, False, False, 32768) == "no_output"
+
+
+def test_memory_danger_stops_the_run(monkeypatch, tmp_path):
+    script = tmp_path / "slow.sh"
+    script.write_text("#!/bin/sh\nsleep 30\n")
+    script.chmod(0o755)
+    monkeypatch.setattr(bench.Monitor, "start", lambda self: setattr(self, "danger", "swap grew by 3.2 GB"))
+    monkeypatch.setattr(bench.Monitor, "finish", lambda self: None)
+    state = bench.run_claude([str(script)], dict(os.environ), tmp_path, "m", 60, 32768)
+    assert state["memory_stop"]
+    assert bench.classify_failure(state, False, False, 32768) == "out_of_memory"

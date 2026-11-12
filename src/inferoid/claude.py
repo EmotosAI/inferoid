@@ -476,6 +476,20 @@ def loaded_footprint_gb(weights: float, delta: float) -> float:
     return delta if delta >= weights * 0.9 else weights + delta
 
 
+def _ollama_post(path: str, payload: dict[str, Any]) -> dict[str, Any]:
+    req = urllib.request.Request(OLLAMA + path, json.dumps(payload).encode(), {"Content-Type": "application/json"})
+    with urllib.request.urlopen(req, timeout=10) as resp:
+        return json.loads(resp.read())
+
+
+def lower_saved_context(model: str, memory: dict[str, float], used: int) -> int:
+    """A run went over the memory limit at `used` tokens: save the next smaller probe size so the next run is safe."""
+    smaller = [n for n in PROBE_CONTEXTS if n < used]
+    new = max(smaller) if smaller else min(PROBE_CONTEXTS)
+    save_context(model, memory, new)
+    return new
+
+
 def system_used_gb() -> float:
     """Memory in use system-wide (GB): wired + active + compressed on macOS, MemTotal - MemAvailable on Linux.
     The change across a model load is what the model really costs, whatever Ollama reports."""

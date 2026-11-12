@@ -145,6 +145,8 @@ class Monitor:
         self.pressure = "normal"
         self.baseline = 0.0  # system memory in use before the model loaded (set by the caller)
         self.weights = 0.0
+        self.start_swap = swap_used_gb()
+        self.danger = ""  # set when the run must stop to protect the Mac
 
     def sample(self) -> None:
         reported = loaded_model_memory(self.model)
@@ -157,6 +159,11 @@ class Monitor:
         current = memory_pressure()
         if levels.get(current, 0) > levels.get(self.pressure, 0):
             self.pressure = current
+        swap = swap_used_gb()
+        if current == "critical":
+            self.danger = "memory pressure critical"
+        elif swap - self.start_swap > SWAP_STOP_GB:
+            self.danger = f"swap grew by {swap - self.start_swap:.1f} GB"
 
     def _run(self) -> None:
         self.sample()
@@ -332,6 +339,7 @@ def _consume_stream(line: str, state: dict[str, Any], start: float) -> None:
                 state[key] = max(state[key], int(value))
 
 
+SWAP_STOP_GB = 3.0  # stop a run when swap grows this much beyond where it started
 STALL_S = 900  # no finished reply for 15 minutes = runaway; MAX_REPLY_TOKENS normally ends a reply well before
 
 
@@ -366,6 +374,11 @@ def run_claude(args: list[str], env: dict[str, str], worktree: Path, model: str,
             remaining = max(0.0, timeout - (time.monotonic() - started))
             if remaining <= 0:
                 timed_out = True
+                _terminate_group(process)
+                break
+            if monitor.danger:
+                state["errors"].append(f"stopped to protect the Mac: {monitor.danger} (out of memory)")
+                state["memory_stop"] = True
                 _terminate_group(process)
                 break
             if time.monotonic() - last_event > STALL_S:
@@ -439,6 +452,12 @@ def _model_info(model: str) -> dict[str, Any]:
         if marker in model.lower():
             quant = marker
             break
+    if quant == "unknown":
+        try:
+            details = claude._ollama_post("/api/show", {"model": model}).get("details") or {}
+            quant = str(details.get("quantization_level") or "unknown").lower()[:16]
+        except (OSError, ValueError, AttributeError):
+            pass
     size = claude.MODEL_GB.get(model, 0.0) or round(claude.weights_gb(model), 2)
     return {"name": model, "size_gb": size, "family": family, "quant": quant}
 
@@ -524,6 +543,11 @@ def run(project: Path, brief_file: Path, check: str, pack: str, task: str, kind:
             transcript.touch(mode=0o600)
             state = run_claude(args, env, worktree, engine_model, timeout, cap, transcript, baseline=baseline)
             print(f"Transcript (kept on this machine, never sent): {transcript}")
+            limit = claude.default_budget(memory) - claude.PROBE_MARGIN_GB
+            if state.get("memory_stop") or float(state.get("peak_model_mem_gb", 0)) > limit:
+                new_cap = claude.lower_saved_context(model, memory, cap)
+                print(f"This run used more memory than the measurement predicted ({state.get('peak_model_mem_gb', 0):.1f} GB, "
+                      f"{limit:.1f} GB allowed). The next run of {model} will use a {new_cap:,}-token context.")
             after_agent = _tree_snapshot(worktree)
             changed = before != after_agent
             if not state.get("interrupted"):  # stopped by the user: record what happened, skip the check
@@ -543,7 +567,7 @@ def run(project: Path, brief_file: Path, check: str, pack: str, task: str, kind:
         if engine_model:
             claude._generate(engine_model, None, 0)  # unload now so the next model never stacks on this one
 
-    failure = ("engine_error" if state.get("setup_error") else
+    failure = ("engine_error" if state.get("setup_error") or state.get("interrupted") else
                "none" if check_passed else classify_failure(state, check_passed, changed, cap))
     if state.get("timed_out"):
         status = "timeout"
