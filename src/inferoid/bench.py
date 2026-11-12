@@ -644,7 +644,8 @@ def run(project: Path, brief_file: Path, check: str, pack: str, task: str, kind:
     try:
         if engine == "ollama":
             engine_model = claude.context_model(model, cap)
-            claude._generate(engine_model, None, 0)  # start unloaded so the memory baseline excludes the model
+            if not os.environ.get("INFEROID_KEEP_LOADED"):  # opt-in warm-session measurement
+                claude._generate(engine_model, None, 0)  # start unloaded so the memory baseline excludes the model
         else:
             engine_model = model
         baseline = claude.system_used_gb()
@@ -713,7 +714,7 @@ def run(project: Path, brief_file: Path, check: str, pack: str, task: str, kind:
     finally:
         if worktree and not keep:
             remove_isolated_copy(project, worktree, is_git)
-        if engine_model and engine == "ollama":
+        if engine_model and engine == "ollama" and not os.environ.get("INFEROID_KEEP_LOADED"):
             claude._generate(engine_model, None, 0)  # unload now so the next model never stacks on this one
 
     failure = ("engine_error" if state.get("setup_error") or state.get("interrupted") else
