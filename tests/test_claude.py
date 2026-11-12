@@ -209,3 +209,9 @@ def test_warm_up_does_not_override_tag_context(monkeypatch):
 
     monkeypatch.setattr(claude.urllib.request, "urlopen", fake_urlopen)
     assert claude.warm_up("m-ctx128k") == "" and "options" not in sent["body"]
+
+
+def test_loaded_footprint_counts_mmapped_weights():
+    assert claude.loaded_footprint_gb(7.2, 13.5) == 13.5  # the change already includes the weights
+    assert claude.loaded_footprint_gb(11.0, 1.6) == 12.6  # weights sat in the file cache; add them back
+    assert claude.loaded_footprint_gb(11.0, -0.4) == 11.0

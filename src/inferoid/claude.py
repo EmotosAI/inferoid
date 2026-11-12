@@ -453,11 +453,10 @@ def probe_context(model: str, memory: dict[str, float], candidates: tuple[int, .
         if weights and gb < weights * 0.9:
             # Some Ollama engines report only part of the footprint (gemma4: 1.1 GB for 7.2 GB of weights).
             # Measure what the Mac actually lost instead; fall back to a worst-case estimate if we cannot.
-            delta = after - before if before and after else 0.0
-            if delta > weights * 0.9:
-                log(f"  {n:>7,} tokens: Ollama reported {gb:.1f} GB, below the {weights:.1f} GB of weights; "
-                    f"measured {delta:.1f} GB of system memory instead")
-                gb = delta
+            if before and after:
+                gb = loaded_footprint_gb(weights, after - before)
+                log(f"  {n:>7,} tokens: Ollama reported a size below the {weights:.1f} GB of weights; "
+                    f"measured system memory puts it at {gb:.1f} GB")
             else:
                 estimate = weights + kv_estimate_gb(model, effective)
                 log(f"  {n:>7,} tokens: Ollama reported {gb:.1f} GB and system memory could not be measured; "
@@ -468,6 +467,14 @@ def probe_context(model: str, memory: dict[str, float], candidates: tuple[int, .
             return effective
         log(f"  {n:>7,} tokens: {gb:.1f} GB, too much ({limit:.1f} GB allowed)")
     return context_for(memory)
+
+
+def loaded_footprint_gb(weights: float, delta: float) -> float:
+    """Model footprint from the system-memory change across a load. Engines that memory-map GGUF weights leave
+    them in the file cache, which the change may not show; then count the weights plus the measured extra
+    (context and compute buffers). Can double count a little, which is the safe direction."""
+    delta = max(0.0, delta)
+    return delta if delta >= weights * 0.9 else weights + delta
 
 
 def system_used_gb() -> float:

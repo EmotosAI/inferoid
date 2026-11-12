@@ -105,6 +105,13 @@ def swap_used_gb() -> float:
 def memory_pressure() -> str:
     if platform.system() == "Darwin":
         try:
+            level = subprocess.check_output(["sysctl", "-n", "kern.memorystatus_vm_pressure_level"], text=True,
+                                            stderr=subprocess.DEVNULL, timeout=2).strip()
+            if level in {"1", "2", "4"}:  # the kernel's own level: 1 normal, 2 warn, 4 critical
+                return {"1": "normal", "2": "warn", "4": "critical"}[level]
+        except (OSError, subprocess.SubprocessError):
+            pass
+        try:
             text = subprocess.check_output(["memory_pressure", "-Q"], text=True, stderr=subprocess.STDOUT, timeout=2).lower()
             if "critical" in text:
                 return "critical"
@@ -143,7 +150,7 @@ class Monitor:
         reported = loaded_model_memory(self.model)
         if self.baseline and self.weights and reported < self.weights * 0.9:
             # Ollama under-reports some models (gemma4); count what the system actually lost since before the load.
-            reported = max(reported, claude.system_used_gb() - self.baseline)
+            reported = max(reported, claude.loaded_footprint_gb(self.weights, claude.system_used_gb() - self.baseline))
         self.peak_model = max(self.peak_model, reported)
         self.peak_swap = max(self.peak_swap, swap_used_gb())
         levels = {"normal": 0, "warn": 1, "critical": 2}
@@ -416,7 +423,8 @@ def _model_info(model: str) -> dict[str, Any]:
         if marker in model.lower():
             quant = marker
             break
-    return {"name": model, "size_gb": claude.MODEL_GB.get(model, 0.0), "family": family, "quant": quant}
+    size = claude.MODEL_GB.get(model, 0.0) or round(claude.weights_gb(model), 2)
+    return {"name": model, "size_gb": size, "family": family, "quant": quant}
 
 
 def _machine_info(memory: dict[str, float]) -> dict[str, Any]:
@@ -474,6 +482,7 @@ def run(project: Path, brief_file: Path, check: str, pack: str, task: str, kind:
                              "wall_s": 0.0, "peak_model_mem_gb": 0.0, "peak_swap_gb": 0.0, "memory_pressure": "normal"}
     check_passed = False
     changed = False
+    engine_model = ""
     try:
         engine_model = claude.context_model(model, cap)
         claude._generate(engine_model, None, 0)  # start unloaded so the memory baseline excludes the model
@@ -497,7 +506,7 @@ def run(project: Path, brief_file: Path, check: str, pack: str, task: str, kind:
             transcript = home() / "bench" / "transcripts" / f"{run_id}.jsonl"
             transcript.parent.mkdir(parents=True, exist_ok=True)
             transcript.touch(mode=0o600)
-            state = run_claude(args, env, worktree, engine_model, timeout, cap, transcript)
+            state = run_claude(args, env, worktree, engine_model, timeout, cap, transcript, baseline=baseline)
             print(f"Transcript (kept on this machine, never sent): {transcript}")
             after_agent = _tree_snapshot(worktree)
             changed = before != after_agent
@@ -514,6 +523,8 @@ def run(project: Path, brief_file: Path, check: str, pack: str, task: str, kind:
     finally:
         if worktree and not keep:
             remove_isolated_copy(project, worktree, is_git)
+        if engine_model:
+            claude._generate(engine_model, None, 0)  # unload now so the next model never stacks on this one
 
     failure = ("engine_error" if state.get("setup_error") else
                "none" if check_passed else classify_failure(state, check_passed, changed, cap))

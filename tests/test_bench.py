@@ -91,7 +91,7 @@ def test_run_uses_and_removes_worktree_without_touching_repo(tmp_path, monkeypat
     monkeypatch.setattr(claude, "ensure_loaded", lambda model: "")
     monkeypatch.setattr(bench, "_engine_version", lambda: "test")
 
-    def fake_run(args, env, worktree, model, timeout, context, transcript=None):
+    def fake_run(args, env, worktree, model, timeout, context, transcript=None, baseline=0.0):
         (worktree / "done.txt").write_text("done\n")
         return {"first_reply_s": 0.1, "turns": 1, "tool_calls": 1, "input_tokens": 2, "output_tokens": 3,
                 "result_seen": True, "errors": [], "timed_out": False, "returncode": 0, "wall_s": 0.2,

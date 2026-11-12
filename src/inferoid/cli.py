@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import sys
 import json
 import os
 
@@ -164,6 +165,11 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(line_buffering=True)  # progress shows up even when output goes to a file
+        except (AttributeError, ValueError):
+            pass
     args = build_parser().parse_args(argv)
     if args.command == "scan":
         print(format_scan(scan(args.days)))
