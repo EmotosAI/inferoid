@@ -568,6 +568,24 @@ def kv_estimate_gb(model: str, tokens: int) -> float:
     def pick(suffix: str) -> Any:
         return next((v for k, v in info.items() if k.endswith(suffix)), None)
 
+    pattern = pick(".attention.sliding_window_pattern")
+    window = pick(".attention.sliding_window")
+    if isinstance(pattern, list) and pattern and isinstance(window, int) and window > 0:
+        # Sliding-window models (Gemma): most layers keep only `window` tokens, often with smaller heads.
+        heads = pick(".attention.head_count_kv")
+        k_full, v_full = pick(".attention.key_length") or 0, pick(".attention.value_length") or 0
+        k_swa = pick(".attention.key_length_swa") or k_full
+        v_swa = pick(".attention.value_length_swa") or v_full
+        total = 0
+        for i, sliding in enumerate(pattern):
+            h = heads[i] if isinstance(heads, list) and i < len(heads) else (heads or 0)
+            if sliding:
+                total += int(h) * (int(k_swa) + int(v_swa)) * 2 * min(tokens, window)
+            else:
+                total += int(h) * (int(k_full) + int(v_full)) * 2 * tokens
+        if total:
+            return total / 1e9
+
     layers = pick(".block_count")
     kv_heads = pick(".attention.head_count_kv")
     key_len = pick(".attention.key_length") or (
