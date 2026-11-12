@@ -64,6 +64,12 @@ inferoid bench run --repo ~/dev/myproject --brief path/to/brief.md \
 
 The check decides pass or fail, so make it strict: it must fail on unchanged input (a copy of the starting files) and pass only when the task's real goal is met. A check that accepts the untouched starting state measures nothing.
 
+## Bigger context
+
+The default context is set by your Mac's memory (32K on 24 GB). A model that is smaller than the one that sets that default can use more. `--context max` loads the model at 128K, 96K, 64K, 48K and 32K in turn, reads how much memory Ollama actually reserved, and keeps the largest that leaves 2 GB free inside macOS's default GPU budget. `--context 64k` asks for one size and refuses if it does not fit. The same option works for `claude-local`.
+
+Expect a longer first reply with a bigger context: the model reads everything you give it at a few hundred tokens a second.
+
 ## Context and transcripts
 
 inferoid creates an Ollama tag with your machine's context cap built in (for example `gemma4-12b-it-qat-ctx32k`), because some models, such as `hf.co/...` imports, load with a 4,096-token context otherwise. If Ollama still loads a smaller context, the run stops before starting and is reported as an engine error, not as a model failure.

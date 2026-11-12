@@ -395,6 +395,82 @@ def warm_up(model: str, timeout: float = 300.0) -> str:
         return str(exc)
 
 
+PROBE_CONTEXTS = (131072, 98304, 65536, 49152, 32768)
+PROBE_MARGIN_GB = 2.0  # GPU memory left free inside macOS's default budget after the model and its context
+
+
+def _generate(model: str, num_ctx: int | None, keep_alive: str | int, timeout: float = 300.0) -> str:
+    """Empty generate call to load or unload a model. Returns Ollama's error text, or ''."""
+    payload: dict[str, Any] = {"model": model, "prompt": "", "keep_alive": keep_alive}
+    if num_ctx:
+        payload["options"] = {"num_ctx": num_ctx}
+    req = urllib.request.Request(OLLAMA + "/api/generate", json.dumps(payload).encode(), {"Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            resp.read()
+        return ""
+    except urllib.error.HTTPError as exc:
+        try:
+            return json.loads(exc.read()).get("error", str(exc))
+        except ValueError:
+            return str(exc)
+    except OSError as exc:
+        return str(exc)
+
+
+def loaded_size_gb(model: str) -> float:
+    """Total memory Ollama reports for a loaded model: weights plus the context it reserved at load time."""
+    try:
+        for m in _ollama("/api/ps").get("models", []):
+            if m.get("name", "").removesuffix(":latest") == model.removesuffix(":latest"):
+                return float(m.get("size") or 0) / 1e9
+    except (OSError, ValueError, TypeError):
+        pass
+    return 0.0
+
+
+def probe_context(model: str, memory: dict[str, float], candidates: tuple[int, ...] = PROBE_CONTEXTS,
+                  gen: Callable[..., str] = _generate, size: Callable[[str], float] = loaded_size_gb,
+                  loaded: Callable[[str], int] = lambda m: loaded_context(m),
+                  log: Callable[[str], None] = print) -> int:
+    """Largest context whose measured footprint fits macOS's default GPU budget minus PROBE_MARGIN_GB.
+    Ollama reserves the whole context when it loads a model, so loading and reading /api/ps measures it."""
+    limit = default_budget(memory) - PROBE_MARGIN_GB
+    for n in sorted(candidates, reverse=True):
+        err = gen(model, n, "30s")
+        if err:
+            log(f"  {n:>7,} tokens: did not load ({err[:80]})")
+            gen(model, None, 0)
+            continue
+        gb, got = size(model), loaded(model)
+        gen(model, None, 0)  # unload before trying the next size
+        effective = got if got and got < n else n
+        if gb and gb <= limit:
+            log(f"  {effective:>7,} tokens: {gb:.1f} GB, fits ({limit:.1f} GB allowed)")
+            return effective
+        log(f"  {n:>7,} tokens: {gb:.1f} GB, too much ({limit:.1f} GB allowed)")
+    return context_for(memory)
+
+
+def resolve_context(model: str, memory: dict[str, float], context: str | int | None, force: bool = False) -> int:
+    """'max' -> measured largest safe context; a number -> that size if it measures as safe; None -> tier default."""
+    if not context:
+        return context_for(memory)
+    if str(context).lower() == "max":
+        print(f"Measuring the largest context {model} can use on this Mac...")
+        return probe_context(model, memory)
+    try:
+        wanted = int(str(context).lower().removesuffix("k")) * (1024 if str(context).lower().endswith("k") else 1)
+    except ValueError:
+        print(f"--context must be a number (e.g. 65536 or 64k) or 'max', not {context!r}")
+        return 0
+    got = probe_context(model, memory, candidates=(wanted,), log=lambda s: None)
+    if got == wanted or force:
+        return wanted
+    print(f"A {wanted:,}-token context does not fit safely for {model} on this Mac. Try --context max.")
+    return 0
+
+
 def context_model(model: str, cap: int, run: Callable[..., Any] = subprocess.run) -> str:
     """Ollama tag with num_ctx baked in. Some models (e.g. hf.co GGUF imports) carry their own num_ctx (often 4096)
     and Claude Code never sends one, so OLLAMA_CONTEXT_LENGTH alone is not enough. Reuses the same weight blobs."""
@@ -483,7 +559,7 @@ def local_command(project: Path, model: str, resume: bool, full: bool = False,
 
 
 def local(project: Path, model: str | None, resume: bool, dry_run: bool = False, full: bool = False,
-          allow_gpu_limit: bool = False) -> int:
+          allow_gpu_limit: bool = False, context: str | None = None) -> int:
     from .night import machine_memory
 
     memory = machine_memory()
@@ -505,15 +581,20 @@ def local(project: Path, model: str | None, resume: bool, dry_run: bool = False,
         print(note.replace("hint: ", "").replace("memory: ", ""))
     if any(not n.startswith("hint:") for n in notes) and not dry_run:
         return 1
+    cap = context_for(memory)
+    if context and not dry_run:
+        cap = resolve_context(model, memory, context)
+        if not cap:
+            return 1
     if not dry_run:
-        model = context_model(model, context_for(memory))  # bake the cap into the Ollama tag the session uses
+        model = context_model(model, cap)  # bake the cap into the Ollama tag the session uses
         err = ensure_loaded(model)
         if err:
             print(f"Ollama could not load {model}: {err}")
             if "GiB" in err:
                 print("Fix: " + (memory_problem(model, gb, memory) or "quit and reopen the Ollama app, then run claude-local again."))
             return 1
-    args, env, mode = local_command(project, model, resume, full, context_for(memory))
+    args, env, mode = local_command(project, model, resume, full, cap)
     if mode == "plain":
         print("No HANDOFF.md here, so the local model starts without a plan. Use --resume to continue the last session instead.")
     hit = _read(state_dir() / "limit-hit.json", {})

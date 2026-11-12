@@ -425,7 +425,8 @@ def run(project: Path, brief_file: Path, check: str, pack: str, task: str, kind:
         model: str | None = None, timeout: int = 1800, max_turns: int = 60,
         allow_bash: list[str] | None = None, reference: Path | None = None,
         no_submit: bool = False, force: bool = False, keep: bool = False,
-        share: list[str] | None = None, from_commit: bool = False) -> tuple[int, Path]:
+        share: list[str] | None = None, from_commit: bool = False,
+        context: str | None = None) -> tuple[int, Path]:
     project = project.resolve()
     brief = brief_file.read_text()
     memory = machine_memory()
@@ -443,7 +444,9 @@ def run(project: Path, brief_file: Path, check: str, pack: str, task: str, kind:
     if problem and not force:
         print(f"Refusing benchmark: {problem} Use --force only if you accept the memory risk.")
         return 2, Path()
-    cap = claude.context_for(memory)
+    cap = claude.resolve_context(model, memory, context, force) if context else claude.context_for(memory)
+    if not cap:
+        return 2, Path()
     run_id = dt.datetime.now(dt.UTC).strftime("%Y%m%dT%H%M%SZ") + "-" + uuid.uuid4().hex[:8]
     worktree: Path | None = None
     is_git = False

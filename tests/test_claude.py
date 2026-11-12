@@ -139,3 +139,35 @@ def test_saved_old_default_moves_to_mlx_build(tmp_path, monkeypatch, capsys):
     assert claude.local(tmp_path, None, resume=False, dry_run=True) == 0
     out = capsys.readouterr().out
     assert "nemotron-3.5-lightning:30b-a3b-mlx" in out and "faster build" in out
+
+
+def test_probe_context_picks_largest_measured_fit():
+    mac24 = {"ram_gb": 24.0, "wired_limit_gb": 0.0}  # default budget ~16.1 GB, minus 2 GB margin
+    sizes = {131072: 17.5, 98304: 15.2, 65536: 12.9, 49152: 11.7, 32768: 10.6}
+    current = {}
+    calls = []
+
+    def gen(model, num_ctx, keep_alive):
+        calls.append((num_ctx, keep_alive))
+        if num_ctx:
+            current["n"] = num_ctx
+        return ""
+
+    got = claude.probe_context("m", mac24, gen=gen, size=lambda m: sizes[current["n"]], loaded=lambda m: current["n"],
+                               log=lambda s: None)
+    assert got == 65536  # 98K measured 15.2 GB > 14.1 GB allowed
+    assert (None, 0) in calls  # unloads between probes
+    # A model whose real maximum is lower reports the context it actually loaded.
+    got = claude.probe_context("m", {"ram_gb": 64.0}, candidates=(131072,), gen=gen, size=lambda m: 9.0,
+                               loaded=lambda m: 40960, log=lambda s: None)
+    assert got == 40960
+
+
+def test_resolve_context_numbers_and_errors(monkeypatch):
+    monkeypatch.setattr(claude, "probe_context", lambda model, memory, candidates=(), log=None: candidates[0] if candidates and candidates[0] <= 65536 else 32768)
+    mac = {"ram_gb": 24.0}
+    assert claude.resolve_context("m", mac, "64k") == 65536
+    assert claude.resolve_context("m", mac, "131072") == 0
+    assert claude.resolve_context("m", mac, "131072", force=True) == 131072
+    assert claude.resolve_context("m", mac, "lots") == 0
+    assert claude.resolve_context("m", mac, None) == 32768

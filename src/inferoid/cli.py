@@ -66,7 +66,8 @@ def claude_main(args: argparse.Namespace) -> int:
     elif args.claude_command == "uninstall":
         print("\n".join(claude.uninstall(project, args.global_)))
     elif args.claude_command == "local":
-        return claude.local(project, args.model, args.resume, args.dry_run, args.full, args.allow_gpu_limit)
+        return claude.local(project, args.model, args.resume, args.dry_run, args.full, args.allow_gpu_limit,
+                            args.context)
     elif args.claude_command == "status":
         print("\n".join(claude.status(project)))
     elif args.claude_command == "statusline":
@@ -119,6 +120,7 @@ def build_parser() -> argparse.ArgumentParser:
     run_bench.add_argument("--kind", default="coding")
     run_bench.add_argument("--model")
     run_bench.add_argument("--timeout", type=int, default=1800)
+    run_bench.add_argument("--context", help="Context size: a number (65536 or 64k) or 'max' to measure the largest safe one")
     run_bench.add_argument("--max-turns", type=int, default=60)
     run_bench.add_argument("--allow-bash", action="append", default=[])
     run_bench.add_argument("--reference")
@@ -149,6 +151,7 @@ def build_parser() -> argparse.ArgumentParser:
     loc = cl_cmds.add_parser("local", help="Continue in Claude Code on a local Ollama model")
     loc.add_argument("--project", default=".")
     loc.add_argument("--model", help="Ollama model (default: picked by memory)")
+    loc.add_argument("--context", help="Context size: a number (65536 or 64k) or 'max' to measure the largest safe one")
     loc.add_argument("--resume", action="store_true", help="Resume the last session instead of starting from HANDOFF.md")
     loc.add_argument("--dry-run", action="store_true")
     loc.add_argument("--full", action="store_true", help="Load MCP servers, skills and all tools (much slower first reply)")
@@ -193,7 +196,7 @@ def main(argv: list[str] | None = None) -> int:
             code, _ = bench.run(Path(args.repo), Path(args.brief), args.check, args.pack, args.task,
                                  args.kind, args.model, args.timeout, args.max_turns, args.allow_bash,
                                  Path(args.reference) if args.reference else None, args.no_submit, args.force, args.keep,
-                                 args.share, args.from_commit)
+                                 args.share, args.from_commit, args.context)
             return code
         if args.bench_command == "submit":
             return bench.submit_files([Path(path) for path in args.files])
