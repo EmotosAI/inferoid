@@ -332,6 +332,9 @@ def _consume_stream(line: str, state: dict[str, Any], start: float) -> None:
                 state[key] = max(state[key], int(value))
 
 
+STALL_S = 900  # no finished reply for 15 minutes = runaway; MAX_REPLY_TOKENS normally ends a reply well before
+
+
 def run_claude(args: list[str], env: dict[str, str], worktree: Path, model: str, timeout: int, context: int,
                transcript: Path | None = None, baseline: float = 0.0) -> dict[str, Any]:
     state: dict[str, Any] = {"first_reply_s": None, "turns": 0, "tool_calls": 0,
@@ -357,24 +360,37 @@ def run_claude(args: list[str], env: dict[str, str], worktree: Path, model: str,
     monitor.start()
     timed_out = False
     ended = False
-    while not ended:
-        remaining = max(0.0, timeout - (time.monotonic() - started))
-        if remaining <= 0:
-            timed_out = True
-            _terminate_group(process)
-            break
-        try:
-            line = lines.get(timeout=min(0.2, remaining))
-            if line is None:
-                ended = process.poll() is not None
-            else:
-                if transcript is not None:
-                    with transcript.open("a") as fh:
-                        fh.write(line if line.endswith("\n") else line + "\n")
-                _consume_stream(line, state, started)
-        except queue.Empty:
-            if process.poll() is not None and lines.empty():
-                ended = True
+    last_event = time.monotonic()
+    try:
+        while not ended:
+            remaining = max(0.0, timeout - (time.monotonic() - started))
+            if remaining <= 0:
+                timed_out = True
+                _terminate_group(process)
+                break
+            if time.monotonic() - last_event > STALL_S:
+                state["errors"].append(f"no reply finished in {STALL_S // 60} minutes (runaway reply); stopped")
+                state["stalled"] = True
+                _terminate_group(process)
+                break
+            try:
+                line = lines.get(timeout=min(0.2, remaining))
+                if line is None:
+                    ended = process.poll() is not None
+                else:
+                    last_event = time.monotonic()
+                    if transcript is not None:
+                        with transcript.open("a") as fh:
+                            fh.write(line if line.endswith("\n") else line + "\n")
+                    _consume_stream(line, state, started)
+            except queue.Empty:
+                if process.poll() is not None and lines.empty():
+                    ended = True
+    except KeyboardInterrupt:
+        # Ctrl+C: stop Claude Code and still write the report; the caller cleans up and unloads.
+        _terminate_group(process)
+        state["errors"].append("stopped by the user (Ctrl+C)")
+        state["interrupted"] = True
     try:
         process.wait(timeout=3)
     except subprocess.TimeoutExpired:
@@ -510,13 +526,14 @@ def run(project: Path, brief_file: Path, check: str, pack: str, task: str, kind:
             print(f"Transcript (kept on this machine, never sent): {transcript}")
             after_agent = _tree_snapshot(worktree)
             changed = before != after_agent
-            try:
-                checked = subprocess.run(["bash", "-lc", check], cwd=worktree, capture_output=True,
-                                         text=True, timeout=300, check=False)
-                check_passed = checked.returncode == 0
-            except subprocess.TimeoutExpired:
-                state["errors"].append("check timed out")
-                check_passed = False
+            if not state.get("interrupted"):  # stopped by the user: record what happened, skip the check
+                try:
+                    checked = subprocess.run(["bash", "-lc", check], cwd=worktree, capture_output=True,
+                                             text=True, timeout=300, check=False)
+                    check_passed = checked.returncode == 0
+                except subprocess.TimeoutExpired:
+                    state["errors"].append("check timed out")
+                    check_passed = False
             changed = changed or before != _tree_snapshot(worktree)
     except (OSError, subprocess.SubprocessError, ValueError) as exc:
         state["errors"].append(str(exc))
@@ -572,7 +589,7 @@ def run(project: Path, brief_file: Path, check: str, pack: str, task: str, kind:
             print(("Forge verdict: " + json.dumps(verdict, sort_keys=True)) if ok and verdict else message)
         except (OSError, TypeError, ValueError) as exc:  # submission must never invalidate a local benchmark
             print(f"Forge submission failed ({type(exc).__name__}); the local report was kept.")
-    return 0, path
+    return (130 if state.get("interrupted") else 0), path
 
 
 def submit_files(paths: list[Path]) -> int:

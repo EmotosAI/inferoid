@@ -215,3 +215,19 @@ def test_loaded_footprint_counts_mmapped_weights():
     assert claude.loaded_footprint_gb(7.2, 13.5) == 13.5  # the change already includes the weights
     assert claude.loaded_footprint_gb(11.0, 1.6) == 12.6  # weights sat in the file cache; add them back
     assert claude.loaded_footprint_gb(11.0, -0.4) == 11.0
+
+
+def test_measured_context_is_saved_and_reused(monkeypatch, tmp_path):
+    monkeypatch.setenv("INFEROID_HOME", str(tmp_path))
+    calls = []
+    monkeypatch.setattr(claude, "probe_context", lambda model, memory, candidates=(), log=None: calls.append(1) or 98304)
+    mac = {"ram_gb": 24.0}
+    assert claude.resolve_context("m:latest", mac, "max") == 98304
+    assert claude.resolve_context("m", mac, "max") == 98304 and len(calls) == 1  # reused, not measured again
+    assert claude.resolve_context("m", mac, "remeasure") == 98304 and len(calls) == 2
+    assert claude.resolve_context("m", mac, None) == 98304  # sessions without --context use it too
+
+
+def test_local_env_caps_reply_tokens():
+    _, env, _ = claude.local_command(Path("."), "m", False, False, 32768)
+    assert env["CLAUDE_CODE_MAX_OUTPUT_TOKENS"] == "8192"

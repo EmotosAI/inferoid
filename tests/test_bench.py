@@ -260,3 +260,35 @@ def test_output_tokens_sum_across_messages_and_estimate_when_engine_reports_zero
     bench._consume_stream(event("c", 0), zero, 0.0)
     bench._consume_stream(event("d", 0), zero, 0.0)
     assert zero["output_tokens"] > 100  # Ollama said 0 for 2 tool calls; estimated from the content instead
+
+
+def test_ctrl_c_stops_claude_and_still_returns_state(monkeypatch, tmp_path):
+    script = tmp_path / "slow.sh"
+    script.write_text("#!/bin/sh\nsleep 30\n")
+    script.chmod(0o755)
+    monkeypatch.setattr(bench.Monitor, "start", lambda self: None)
+    monkeypatch.setattr(bench.Monitor, "finish", lambda self: None)
+    calls = {"n": 0}
+    real_get = bench.queue.Queue.get
+
+    def interrupting_get(self, *a, **kw):
+        calls["n"] += 1
+        if calls["n"] > 2:
+            raise KeyboardInterrupt
+        return real_get(self, *a, **kw)
+
+    monkeypatch.setattr(bench.queue.Queue, "get", interrupting_get)
+    state = bench.run_claude([str(script)], dict(os.environ), tmp_path, "m", 60, 32768)
+    assert state["interrupted"] and "Ctrl+C" in " ".join(state["errors"])
+
+
+def test_runaway_reply_is_stopped(monkeypatch, tmp_path):
+    script = tmp_path / "slow.sh"
+    script.write_text("#!/bin/sh\nsleep 30\n")
+    script.chmod(0o755)
+    monkeypatch.setattr(bench, "STALL_S", 1)
+    monkeypatch.setattr(bench.Monitor, "start", lambda self: None)
+    monkeypatch.setattr(bench.Monitor, "finish", lambda self: None)
+    state = bench.run_claude([str(script)], dict(os.environ), tmp_path, "m", 60, 32768)
+    assert state["stalled"] and not state["timed_out"]
+    assert bench.classify_failure(state, False, False, 32768) == "no_output"

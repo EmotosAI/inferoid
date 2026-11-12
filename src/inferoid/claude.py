@@ -36,6 +36,7 @@ HANDOFF_PROMPT = ("Another assistant started work in this repo and was stopped. 
 OLLAMA = os.environ.get("OLLAMA_HOST", "http://127.0.0.1:11434")
 if not OLLAMA.startswith("http"):
     OLLAMA = "http://" + OLLAMA
+MAX_REPLY_TOKENS = 8192  # per reply; about 6 minutes at 24 tokens/s
 LOCAL_CONTEXT = 32768  # floor; the real cap comes from context_for(memory)
 
 # Memory safety (2026-11-11: a 24 GB Mac froze when Nemotron grew to ~94K tokens of context with the GPU limit
@@ -294,12 +295,12 @@ def preflight(model: str, model_gb: float, memory: dict[str, float]) -> list[str
     if not shutil.which("claude"):
         notes.append("Claude Code is not installed (https://code.claude.com).")
     try:
-        names = {m.get("name") for m in _ollama("/api/tags").get("models", [])}
-        if model not in names:
+        names = {m.get("name", "").removesuffix(":latest") for m in _ollama("/api/tags").get("models", [])}
+        if model.removesuffix(":latest") not in names:
             notes.append(f"Model not downloaded. Run: ollama pull {model}")
     except OSError:
         notes.append("Ollama is not running. Open the Ollama app (or run: ollama serve).")
-    cap = context_for(memory)
+    cap = saved_context(model, memory) or context_for(memory)
     ctx = os.environ.get("OLLAMA_CONTEXT_LENGTH") or _launchctl("OLLAMA_CONTEXT_LENGTH")
     if ctx and ctx.isdigit() and int(ctx) > cap:
         notes.append(f"memory: Ollama's context is {int(ctx):,} tokens, above the safe {cap:,} for this Mac. Run inferoid setup, or: "
@@ -543,13 +544,44 @@ def kv_estimate_gb(model: str, tokens: int) -> float:
     return per_token * tokens / 1e9
 
 
+def _probe_file() -> Path:
+    return state_dir().parent / "contexts.json"
+
+
+def _probe_key(model: str, memory: dict[str, float]) -> str:
+    return f"{model.removesuffix(':latest')}|{round(float(memory.get('ram_gb', 0)))}"
+
+
+def saved_context(model: str, memory: dict[str, float]) -> int:
+    """Context measured earlier for this model on this Mac, so near-limit measurements don't flip between runs."""
+    try:
+        return int(json.loads(_probe_file().read_text()).get(_probe_key(model, memory), 0))
+    except (OSError, ValueError, TypeError, AttributeError):
+        return 0
+
+
+def save_context(model: str, memory: dict[str, float], tokens: int) -> None:
+    try:
+        data = json.loads(_probe_file().read_text()) if _probe_file().exists() else {}
+    except (OSError, ValueError):
+        data = {}
+    data[_probe_key(model, memory)] = int(tokens)
+    _probe_file().write_text(json.dumps(data, indent=1))
+
+
 def resolve_context(model: str, memory: dict[str, float], context: str | int | None, force: bool = False) -> int:
     """'max' -> measured largest safe context; a number -> that size if it measures as safe; None -> tier default."""
     if not context:
-        return context_for(memory)
-    if str(context).lower() == "max":
+        return saved_context(model, memory) or context_for(memory)
+    if str(context).lower() in ("max", "remeasure"):
+        saved = saved_context(model, memory)
+        if saved and str(context).lower() == "max":
+            print(f"Using the measured context for {model}: {saved:,} tokens (--context remeasure measures again)")
+            return saved
         print(f"Measuring the largest context {model} can use on this Mac...")
-        return probe_context(model, memory)
+        got = probe_context(model, memory)
+        save_context(model, memory, got)
+        return got
     try:
         wanted = int(str(context).lower().removesuffix("k")) * (1024 if str(context).lower().endswith("k") else 1)
     except ValueError:
@@ -640,7 +672,9 @@ def local_command(project: Path, model: str, resume: bool, full: bool = False,
                   context: int = LOCAL_CONTEXT) -> tuple[list[str], dict[str, str], str]:
     # Claude Code compacts the conversation before it reaches this, so the local context never grows past the cap.
     env = dict(os.environ, ANTHROPIC_BASE_URL=OLLAMA, ANTHROPIC_AUTH_TOKEN="ollama", ANTHROPIC_API_KEY="",
-               CLAUDE_CODE_MAX_CONTEXT_TOKENS=str(context))
+               CLAUDE_CODE_MAX_CONTEXT_TOKENS=str(context),
+               # One reply may not run away (gemma4 thought for 18K tokens without ending its turn).
+               CLAUDE_CODE_MAX_OUTPUT_TOKENS=os.environ.get("INFEROID_MAX_REPLY_TOKENS", str(MAX_REPLY_TOKENS)))
     args = ["claude", "--model", model, "--settings", picker_settings(model)] + ([] if full else LEAN_ARGS)
     if resume:
         return args + ["--continue"], env, "resume"
@@ -672,7 +706,7 @@ def local(project: Path, model: str | None, resume: bool, dry_run: bool = False,
         print(note.replace("hint: ", "").replace("memory: ", ""))
     if any(not n.startswith("hint:") for n in notes) and not dry_run:
         return 1
-    cap = context_for(memory)
+    cap = saved_context(model, memory) or context_for(memory)
     if context and not dry_run:
         cap = resolve_context(model, memory, context)
         if not cap:
