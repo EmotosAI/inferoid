@@ -124,6 +124,8 @@ def build_parser() -> argparse.ArgumentParser:
     run_bench.add_argument("--context", help="Context size: a number (65536 or 64k) or 'max' to measure the largest safe one")
     run_bench.add_argument("--max-turns", type=int, default=200)  # time, not turns, should end a bench
     run_bench.add_argument("--allow-bash", action="append", default=[])
+    run_bench.add_argument("--deny-tool", action="append", default=[],
+                           help="Hide a Claude Code tool from the model (e.g. Edit, Write) so the task's own commands are used")
     run_bench.add_argument("--reference")
     run_bench.add_argument("--no-submit", action="store_true")
     run_bench.add_argument("--force", action="store_true")
@@ -212,7 +214,7 @@ def main(argv: list[str] | None = None) -> int:
             code, _ = bench.run(Path(args.repo), Path(args.brief), args.check, args.pack, args.task,
                                  args.kind, args.model, args.timeout, args.max_turns, args.allow_bash,
                                  Path(args.reference) if args.reference else None, args.no_submit, args.force, args.keep,
-                                 args.share, args.from_commit, args.context, args.clean)
+                                 args.share, args.from_commit, args.context, args.clean, args.deny_tool)
             return code
         if args.bench_command == "submit":
             return bench.submit_files([Path(path) for path in args.files])

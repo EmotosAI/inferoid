@@ -380,3 +380,11 @@ def test_local_report_keeps_local_only_but_submit_strips_it(tmp_path, monkeypatc
     saved = json.loads(path.read_text())
     assert saved["local_only"]["clean_changes"]["thinking_disabled"] == 3
     assert "local_only" not in forge.allowlisted_report(saved)
+
+
+def test_denied_tools_are_hidden_and_not_allowed(tmp_path):
+    args, _ = bench.command_for(tmp_path, "m", "brief", 32768, ["cp"], ["Edit", "Write"])
+    tools = args[args.index("--tools") + 1].split(",")
+    assert "Edit" not in tools and "Write" not in tools and "Bash" in tools
+    allowed = args[args.index("--allowedTools") + 1:]
+    assert "Edit" not in allowed and "Bash(cp *)" in allowed

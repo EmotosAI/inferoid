@@ -207,20 +207,25 @@ class Monitor:
             self.thread.join(timeout=3)
 
 
-def _allowed_tools(patterns: list[str]) -> list[str]:
-    tools = list(claude.LEAN_TOOLS.split(","))
+def _allowed_tools(patterns: list[str], deny: list[str] | None = None) -> list[str]:
+    tools = [t for t in claude.LEAN_TOOLS.split(",") if t not in (deny or [])]
     tools.extend(f"Bash({pattern} *)" for pattern in [*BASH_PATTERNS, *patterns])
     return tools
 
 
-def command_for(worktree: Path, model: str, brief: str, context: int, patterns: list[str]) -> tuple[list[str], dict[str, str]]:
+def command_for(worktree: Path, model: str, brief: str, context: int, patterns: list[str],
+                deny: list[str] | None = None) -> tuple[list[str], dict[str, str]]:
     base, env, mode = claude.local_command(worktree, model, resume=False, full=False, context=context)
+    if deny and "--tools" in base:
+        # The model does not even see denied tools, e.g. no Edit/Write so a task's own safe edit command is the only way.
+        i = base.index("--tools") + 1
+        base[i] = ",".join(t for t in base[i].split(",") if t not in deny)
     # local_command supplies the exact settings and lean arguments. The benchmark replaces
     # its optional handoff/plain prompt with the task brief while keeping that launch shape.
     if mode == "handoff" and base and base[-1] == claude.HANDOFF_PROMPT:
         base = base[:-1]
     args = [*base, "-p", brief, "--output-format", "stream-json", "--verbose", "--max-turns", str(60)]
-    args += ["--allowedTools", *_allowed_tools(patterns)]
+    args += ["--allowedTools", *_allowed_tools(patterns, deny)]
     return args, env
 
 
@@ -558,7 +563,7 @@ def run(project: Path, brief_file: Path, check: str, pack: str, task: str, kind:
         allow_bash: list[str] | None = None, reference: Path | None = None,
         no_submit: bool = False, force: bool = False, keep: bool = False,
         share: list[str] | None = None, from_commit: bool = False,
-        context: str | None = None, clean: bool = True) -> tuple[int, Path]:
+        context: str | None = None, clean: bool = True, deny_tools: list[str] | None = None) -> tuple[int, Path]:
     project = project.resolve()
     brief = brief_file.read_text()
     if not no_submit:
@@ -607,7 +612,7 @@ def run(project: Path, brief_file: Path, check: str, pack: str, task: str, kind:
         else:
             worktree, is_git = make_isolated_copy(project, run_id, share, from_commit)
             before = _tree_snapshot(worktree)
-            args, env = command_for(worktree, engine_model, brief, cap, allow_bash or [])
+            args, env = command_for(worktree, engine_model, brief, cap, allow_bash or [], deny_tools)
             # max-turns is a benchmark setting, so replace the command helper's default.
             args[args.index("--max-turns") + 1] = str(max_turns)
             transcript = home() / "bench" / "transcripts" / f"{run_id}.jsonl"
