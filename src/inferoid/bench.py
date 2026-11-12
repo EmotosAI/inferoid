@@ -136,9 +136,15 @@ class Monitor:
         self.peak_model = 0.0
         self.peak_swap = 0.0
         self.pressure = "normal"
+        self.baseline = 0.0  # system memory in use before the model loaded (set by the caller)
+        self.weights = 0.0
 
     def sample(self) -> None:
-        self.peak_model = max(self.peak_model, loaded_model_memory(self.model))
+        reported = loaded_model_memory(self.model)
+        if self.baseline and self.weights and reported < self.weights * 0.9:
+            # Ollama under-reports some models (gemma4); count what the system actually lost since before the load.
+            reported = max(reported, claude.system_used_gb() - self.baseline)
+        self.peak_model = max(self.peak_model, reported)
         self.peak_swap = max(self.peak_swap, swap_used_gb())
         levels = {"normal": 0, "warn": 1, "critical": 2}
         current = memory_pressure()
@@ -289,6 +295,18 @@ def _consume_stream(line: str, state: dict[str, Any], start: float) -> None:
         if isinstance(content, list):
             state["tool_calls"] += sum(1 for block in content if isinstance(block, dict) and block.get("type") == "tool_use")
         usage = message.get("usage", {}) if isinstance(message, dict) else {}
+        # Output is a sum over messages. Claude Code emits one event per content block with the same message id,
+        # and Ollama often reports 0 output tokens there, so fall back to about 4 characters per token.
+        reported = usage.get("output_tokens") if isinstance(usage, dict) else None
+        guess = len(json.dumps(content)) // 4 if isinstance(content, list) and content else 0
+        key = message.get("id") if isinstance(message, dict) and message.get("id") else f"turn-{state['turns']}"
+        entry = state.setdefault("_outputs", {}).setdefault(key, {"reported": 0, "guess": 0})
+        if isinstance(reported, (int, float)):
+            entry["reported"] = max(entry["reported"], int(reported))
+        entry["guess"] += guess
+        total = sum(e["reported"] or e["guess"] for e in state["_outputs"].values())
+        state["output_tokens"] = max(state["output_tokens"], total)
+        usage = {k: v for k, v in usage.items() if k != "output_tokens"} if isinstance(usage, dict) else {}
     elif kind == "result":
         state["result_seen"] = True
         if state["first_reply_s"] is None:
@@ -308,11 +326,12 @@ def _consume_stream(line: str, state: dict[str, Any], start: float) -> None:
 
 
 def run_claude(args: list[str], env: dict[str, str], worktree: Path, model: str, timeout: int, context: int,
-               transcript: Path | None = None) -> dict[str, Any]:
+               transcript: Path | None = None, baseline: float = 0.0) -> dict[str, Any]:
     state: dict[str, Any] = {"first_reply_s": None, "turns": 0, "tool_calls": 0,
                              "input_tokens": 0, "output_tokens": 0, "result_seen": False, "errors": []}
     started = time.monotonic()
     monitor = Monitor(model)
+    monitor.baseline, monitor.weights = baseline, (claude.weights_gb(model) if baseline else 0.0)
     lines: queue.Queue[str | None] = queue.Queue()
     process = subprocess.Popen(args, cwd=worktree, env=env, stdin=subprocess.DEVNULL,
                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
@@ -457,6 +476,8 @@ def run(project: Path, brief_file: Path, check: str, pack: str, task: str, kind:
     changed = False
     try:
         engine_model = claude.context_model(model, cap)
+        claude._generate(engine_model, None, 0)  # start unloaded so the memory baseline excludes the model
+        baseline = claude.system_used_gb()
         err = claude.ensure_loaded(engine_model)
         loaded = claude.loaded_context(engine_model) if not err else 0
         if not err and loaded and loaded < cap:

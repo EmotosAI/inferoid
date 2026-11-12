@@ -241,3 +241,22 @@ def test_local_errors_stay_local():
                          "peak_model_mem_gb": 0.0, "peak_swap_gb": 0.0, "memory_pressure": "normal"},
               "local_only": {"errors": ["/Users/someone/secret/path failed"]}}
     assert "local_only" not in forge.allowlisted_report(report)
+
+
+def test_output_tokens_sum_across_messages_and_estimate_when_engine_reports_zero():
+    state = {"first_reply_s": None, "turns": 0, "tool_calls": 0, "input_tokens": 0, "output_tokens": 0,
+             "result_seen": False, "errors": []}
+    block = {"type": "tool_use", "name": "Grep", "input": {"pattern": "plan" * 50}}
+
+    def event(mid, out):
+        return json.dumps({"type": "assistant", "message": {"id": mid, "content": [block],
+                                                            "usage": {"input_tokens": 1000, "output_tokens": out}}})
+
+    bench._consume_stream(event("a", 120), state, 0.0)
+    bench._consume_stream(event("b", 80), state, 0.0)
+    assert state["output_tokens"] == 200  # summed, not the largest single message
+    zero = {"first_reply_s": None, "turns": 0, "tool_calls": 0, "input_tokens": 0, "output_tokens": 0,
+            "result_seen": False, "errors": []}
+    bench._consume_stream(event("c", 0), zero, 0.0)
+    bench._consume_stream(event("d", 0), zero, 0.0)
+    assert zero["output_tokens"] > 100  # Ollama said 0 for 2 tool calls; estimated from the content instead

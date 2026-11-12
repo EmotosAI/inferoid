@@ -433,30 +433,63 @@ def loaded_size_gb(model: str) -> float:
 def probe_context(model: str, memory: dict[str, float], candidates: tuple[int, ...] = PROBE_CONTEXTS,
                   gen: Callable[..., str] = _generate, size: Callable[[str], float] = loaded_size_gb,
                   loaded: Callable[[str], int] = lambda m: loaded_context(m),
-                  log: Callable[[str], None] = print) -> int:
+                  log: Callable[[str], None] = print,
+                  used: Callable[[], float] | None = None) -> int:
     """Largest context whose measured footprint fits macOS's default GPU budget minus PROBE_MARGIN_GB.
     Ollama reserves the whole context when it loads a model, so loading and reading /api/ps measures it."""
     limit = default_budget(memory) - PROBE_MARGIN_GB
+    used = used or system_used_gb
     for n in sorted(candidates, reverse=True):
+        before = used()
         err = gen(model, n, "30s")
         if err:
             log(f"  {n:>7,} tokens: did not load ({err[:80]})")
             gen(model, None, 0)
             continue
-        gb, got = size(model), loaded(model)
+        gb, got, after = size(model), loaded(model), used()
         gen(model, None, 0)  # unload before trying the next size
         effective = got if got and got < n else n
         weights = weights_gb(model)
         if weights and gb < weights * 0.9:
             # Some Ollama engines report only part of the footprint (gemma4: 1.1 GB for 7.2 GB of weights).
-            estimate = weights + kv_estimate_gb(model, effective)
-            log(f"  {n:>7,} tokens: Ollama reported {gb:.1f} GB, below the {weights:.1f} GB of weights; using an estimate of {estimate:.1f} GB")
-            gb = estimate
+            # Measure what the Mac actually lost instead; fall back to a worst-case estimate if we cannot.
+            delta = after - before if before and after else 0.0
+            if delta > weights * 0.9:
+                log(f"  {n:>7,} tokens: Ollama reported {gb:.1f} GB, below the {weights:.1f} GB of weights; "
+                    f"measured {delta:.1f} GB of system memory instead")
+                gb = delta
+            else:
+                estimate = weights + kv_estimate_gb(model, effective)
+                log(f"  {n:>7,} tokens: Ollama reported {gb:.1f} GB and system memory could not be measured; "
+                    f"using a worst-case estimate of {estimate:.1f} GB")
+                gb = estimate
         if gb and gb <= limit:
             log(f"  {effective:>7,} tokens: {gb:.1f} GB, fits ({limit:.1f} GB allowed)")
             return effective
         log(f"  {n:>7,} tokens: {gb:.1f} GB, too much ({limit:.1f} GB allowed)")
     return context_for(memory)
+
+
+def system_used_gb() -> float:
+    """Memory in use system-wide (GB): wired + active + compressed on macOS, MemTotal - MemAvailable on Linux.
+    The change across a model load is what the model really costs, whatever Ollama reports."""
+    try:
+        if platform.system() == "Darwin":
+            text = subprocess.check_output(["vm_stat"], text=True, timeout=5)
+            page = int(re.search(r"page size of (\d+)", text).group(1))
+            pages = 0
+            for label in ("Pages wired down", "Pages active", "Pages occupied by compressor"):
+                match = re.search(label + r":\s+(\d+)", text)
+                pages += int(match.group(1)) if match else 0
+            return pages * page / 1e9
+        values = {}
+        with open("/proc/meminfo") as fh:
+            for line in fh:
+                key, _, rest = line.partition(":")
+                values[key] = int(rest.split()[0]) * 1024
+        return (values["MemTotal"] - values["MemAvailable"]) / 1e9
+    except (OSError, ValueError, KeyError, AttributeError, subprocess.SubprocessError):
+        return 0.0
 
 
 def weights_gb(model: str) -> float:
