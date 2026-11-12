@@ -661,10 +661,12 @@ def run(project: Path, brief_file: Path, check: str, pack: str, task: str, kind:
 
     failure = ("engine_error" if state.get("setup_error") or state.get("interrupted") else
                "none" if check_passed else classify_failure(state, check_passed, changed, cap))
-    if state.get("timed_out"):
+    if check_passed:
+        status = "pass"  # the work is done even if the model kept going until the time limit
+        if state.get("timed_out"):
+            state.setdefault("errors", []).append("passed the check but did not stop before the time limit")
+    elif state.get("timed_out"):
         status = "timeout"
-    elif check_passed:
-        status = "pass"
     elif failure == "engine_error" and not state.get("result_seen"):
         status = "error"
     else:
