@@ -310,8 +310,10 @@ def test_memory_danger_stops_the_run(monkeypatch, tmp_path):
     assert bench.classify_failure(state, False, False, 32768) == "out_of_memory"
 
 
-def _monitor(monkeypatch, swaps, model_gb=11.0, pressure="normal"):
+def _monitor(monkeypatch, swaps, model_gb=11.0, pressure="normal", wired=None):
     seq = iter(swaps)
+    wired_seq = iter(wired or [5.0] * 20)
+    monkeypatch.setattr(bench.claude, "system_wired_gb", lambda: next(wired_seq))
     monkeypatch.setattr(bench, "swap_used_gb", lambda: next(seq))
     monkeypatch.setattr(bench, "loaded_model_memory", lambda m: model_gb)
     monkeypatch.setattr(bench, "memory_pressure", lambda: pressure)
@@ -340,12 +342,21 @@ def test_monitor_stops_over_budget_and_on_jumps(monkeypatch):
     m.limit = 16.1
     m.sample()
     assert "over the 16.1 GB" in m.danger
-    m = _monitor(monkeypatch, [0.0, 0.0, 0.0], model_gb=11.0)
-    m.limit = 16.1
-    m.sample()
-    monkeypatch.setattr(bench, "loaded_model_memory", lambda x: 14.0)
+    # Wired memory jumping after warm-up stops the run; during warm-up it does not.
+    m = _monitor(monkeypatch, [0.0] * 8, wired=[5.0, 9.0, 9.0, 9.0, 12.0])
+    for _ in range(4):
+        m.sample()
+    assert not m.danger
     m.sample()
     assert "jumped" in m.danger
+
+
+def test_under_reported_model_uses_estimate_not_file_cache(monkeypatch):
+    # Ollama says 1.3 GB for 11.5 GB of weights: no budget stop from a figure that includes the file cache.
+    m = _monitor(monkeypatch, [2.36] * 5, model_gb=1.3)
+    m.weights, m.estimate, m.limit = 11.5, 13.9, 16.1
+    m.sample(); m.sample()
+    assert not m.danger and m.peak_model == 13.9
 
 
 def test_failed_submit_is_queued_and_resent(monkeypatch, tmp_path):

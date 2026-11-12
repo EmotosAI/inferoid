@@ -486,6 +486,23 @@ def lower_saved_context(model: str, memory: dict[str, float], used: int) -> int:
     return new
 
 
+def system_wired_gb() -> float:
+    """Wired + compressed memory (GB) on macOS: GPU buffers and squeezed pages, without the file cache that holds
+    memory-mapped GGUF weights. Used to spot sudden growth during a run. 0 when unknown (not macOS)."""
+    if platform.system() != "Darwin":
+        return 0.0
+    try:
+        text = subprocess.check_output(["vm_stat"], text=True, timeout=5)
+        page = int(re.search(r"page size of (\d+)", text).group(1))
+        pages = 0
+        for label in ("Pages wired down", "Pages occupied by compressor"):
+            match = re.search(label + r":\s+(\d+)", text)
+            pages += int(match.group(1)) if match else 0
+        return pages * page / 1e9
+    except (OSError, ValueError, AttributeError, subprocess.SubprocessError):
+        return 0.0
+
+
 def system_used_gb() -> float:
     """Memory in use system-wide (GB): wired + active + compressed on macOS, MemTotal - MemAvailable on Linux.
     The change across a model load is what the model really costs, whatever Ollama reports."""

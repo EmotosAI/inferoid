@@ -150,20 +150,26 @@ class Monitor:
         self.limit = 0.0  # macOS's default GPU budget; set by the caller
         self.last_sample = 0.0
         self.max_gap = 0.0
-        self.last_model = 0.0
+        self.last_wired = 0.0
+        self.samples = 0
+        self.estimate = 0.0  # layout estimate for models Ollama under-reports; set by the caller
 
     def sample(self) -> None:
         now = time.monotonic()
         gap = now - self.last_sample if self.last_sample else 0.0
         self.last_sample = now
         self.max_gap = max(self.max_gap, gap)
+        self.samples += 1
         reported = loaded_model_memory(self.model)
-        if self.baseline and self.weights and reported < self.weights * 0.9:
-            # Ollama under-reports some models (gemma4); count what the system actually lost since before the load.
-            reported = max(reported, claude.loaded_footprint_gb(self.weights, claude.system_used_gb() - self.baseline))
-        jump = reported - self.last_model if self.last_model else 0.0
-        self.last_model = reported
+        trusted = not self.weights or reported >= self.weights * 0.9
+        if not trusted:
+            # Ollama under-reports some models. System-memory deltas include the file cache holding the GGUF, so they
+            # are not a model figure either: report the probe's layout estimate instead.
+            reported = max(reported, self.estimate)
         self.peak_model = max(self.peak_model, reported)
+        wired = claude.system_wired_gb()
+        jump = wired - self.last_wired if self.last_wired and self.samples > WARMUP_SAMPLES else 0.0
+        self.last_wired = wired
         swap = swap_used_gb()
         growth = max(0.0, swap - self.start_swap)
         self.peak_swap = max(self.peak_swap, growth)  # swap added during the run, not swap left from earlier
@@ -179,10 +185,10 @@ class Monitor:
             self.danger = f"the Mac stalled for {gap:.0f} s between memory samples"
         elif growth > SWAP_STOP_GB:
             self.danger = f"swap grew by {growth:.1f} GB during the run"
-        elif self.limit and reported > self.limit:
+        elif self.limit and trusted and reported > self.limit:
             self.danger = f"model memory {reported:.1f} GB is over the {self.limit:.1f} GB GPU budget"
         elif jump > JUMP_STOP_GB:
-            self.danger = f"model memory jumped by {jump:.1f} GB in {gap:.0f} s (a reload or second copy?)"
+            self.danger = f"GPU and compressed memory jumped by {jump:.1f} GB in {gap:.0f} s"
         elif current == "critical":
             self.danger = "memory pressure critical"
 
@@ -362,6 +368,7 @@ def _consume_stream(line: str, state: dict[str, Any], start: float) -> None:
 
 SWAP_STOP_GB = 1.0  # stop a run when swap grows this much beyond where it started
 STALL_GAP_S = 10.0  # a gap this long between 2-second samples means macOS is stalling
+WARMUP_SAMPLES = 3  # the first samples after a load still see the load itself
 JUMP_STOP_GB = 2.5  # model memory growing this fast is a reload or second copy, not the context filling
 STALL_S = 600  # no finished reply for 10 minutes = runaway; MAX_REPLY_TOKENS normally ends a reply well before
 
@@ -372,8 +379,10 @@ def run_claude(args: list[str], env: dict[str, str], worktree: Path, model: str,
                              "input_tokens": 0, "output_tokens": 0, "result_seen": False, "errors": []}
     started = time.monotonic()
     monitor = Monitor(model)
-    monitor.baseline, monitor.weights = baseline, (claude.weights_gb(model) if baseline else 0.0)
+    monitor.baseline, monitor.weights = baseline, claude.weights_gb(model)
     monitor.limit = limit
+    if monitor.weights:
+        monitor.estimate = monitor.weights + claude.kv_estimate_gb(model, context) + claude.RUNTIME_GB
     lines: queue.Queue[str | None] = queue.Queue()
     process = subprocess.Popen(args, cwd=worktree, env=env, stdin=subprocess.DEVNULL,
                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
@@ -604,7 +613,8 @@ def run(project: Path, brief_file: Path, check: str, pack: str, task: str, kind:
                                limit=claude.default_budget(memory))
             print(f"Transcript (kept on this machine, never sent): {transcript}")
             limit = claude.default_budget(memory) - claude.PROBE_MARGIN_GB
-            if state.get("memory_stop") or float(state.get("peak_model_mem_gb", 0)) > limit:
+            over = state.get("memory_stop") or float(state.get("peak_model_mem_gb", 0)) > limit
+            if over and int(state.get("turns", 0)) > 0:  # a stop before the first turn says nothing about context
                 new_cap = claude.lower_saved_context(model, memory, cap)
                 print(f"This run used more memory than the measurement predicted ({state.get('peak_model_mem_gb', 0):.1f} GB, "
                       f"{limit:.1f} GB allowed). The next run of {model} will use a {new_cap:,}-token context.")
