@@ -449,6 +449,11 @@ def probe_context(model: str, memory: dict[str, float], candidates: tuple[int, .
         gen(model, None, 0)  # unload before trying the next size
         effective = got if got and got < n else n
         weights = weights_gb(model)
+        layout = weights + kv_estimate_gb(model, effective) + RUNTIME_GB if weights else 0.0
+        if weights and gb >= weights * 0.9 and layout > gb:
+            # Ollama's own figure leaves out context checkpoints and compute buffers (Nemotron REAP: 12.2 vs ~14 GB).
+            log(f"  {n:>7,} tokens: Ollama reported {gb:.1f} GB; the layout estimate {layout:.1f} GB is higher, using it")
+            gb = layout
         if weights and gb < weights * 0.9:
             # Some Ollama engines report only part of the footprint (gemma4: 1.1 GB for 7.2 GB of weights), and
             # system-memory deltas swing by several GB a minute apart. Use a fixed formula instead: weights + context
