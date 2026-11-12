@@ -750,6 +750,13 @@ LEAN_TOOLS = "Bash,Read,Edit,Write,Glob,Grep"
 LEAN_ARGS = ["--strict-mcp-config", "--disable-slash-commands", "--tools", LEAN_TOOLS, "--effort", "low"]
 
 
+def reply_cap(context: int) -> int:
+    """Per-reply output cap. Claude Code reserves it from the window, so small windows need a small cap, but Claude
+    Code ENDS the session when a reply exceeds it (LFM2.5 wrote a whole plan in one reply at 4,096 and was cut off).
+    4,096 up to 48K of context, 8,192 from 64K."""
+    return MAX_REPLY_TOKENS if context < 60000 else 2 * MAX_REPLY_TOKENS
+
+
 def local_command(project: Path, model: str, resume: bool, full: bool = False,
                   context: int = LOCAL_CONTEXT, base_url: str | None = None,
                   engine: str = "ollama") -> tuple[list[str], dict[str, str], str]:
@@ -760,7 +767,7 @@ def local_command(project: Path, model: str, resume: bool, full: bool = False,
     env = dict(base_env, ANTHROPIC_BASE_URL=base_url or OLLAMA, ANTHROPIC_AUTH_TOKEN="ollama", ANTHROPIC_API_KEY="",
                CLAUDE_CODE_MAX_CONTEXT_TOKENS=str(context),
                # One reply may not run away (gemma4 thought for 18K tokens without ending its turn).
-               CLAUDE_CODE_MAX_OUTPUT_TOKENS=os.environ.get("INFEROID_MAX_REPLY_TOKENS", str(MAX_REPLY_TOKENS)))
+               CLAUDE_CODE_MAX_OUTPUT_TOKENS=os.environ.get("INFEROID_MAX_REPLY_TOKENS", str(reply_cap(context))))
     args = ["claude", "--model", model, "--settings", picker_settings(model, engine)] + ([] if full else LEAN_ARGS)
     if resume:
         return args + ["--continue"], env, "resume"
