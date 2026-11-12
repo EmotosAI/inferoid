@@ -187,12 +187,12 @@ def test_probe_distrusts_size_below_weights(monkeypatch):
     # Ollama reports 1.1 GB and system memory cannot be read -> worst-case estimate.
     got = claude.probe_context("gemma", {"ram_gb": 24.0}, gen=gen, size=lambda m: 1.1, loaded=lambda m: cur["n"],
                                log=lambda s: None, used=lambda: 0.0)
-    assert got == 65536  # 7.2 + 8.0 > 14.1 at 96K/128K; 7.2 + 3.0 fits at 64K
-    # With system memory readable, the measured load cost wins over the estimate.
-    reads = iter([100.0, 100.0 + 13.5, 100.0, 100.0 + 11.0] * 3)
+    assert got == 65536  # 7.2 + 8.0 + 2 > 14.1 at 96K/128K; 7.2 + 3.0 + 2 fits at 64K
+    # The answer does not depend on noisy system-memory readings.
+    noisy = iter([100.0, 117.2, 100.0, 112.6] * 5)
     got = claude.probe_context("gemma", {"ram_gb": 24.0}, gen=gen, size=lambda m: 1.1, loaded=lambda m: cur["n"],
-                               log=lambda s: None, used=lambda: next(reads))
-    assert got == 131072  # measured 13.5 GB at 128K fits the 14.1 GB allowed
+                               log=lambda s: None, used=lambda: next(noisy))
+    assert got == 65536
 
 
 def test_warm_up_does_not_override_tag_context(monkeypatch):

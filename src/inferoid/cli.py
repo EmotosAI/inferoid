@@ -122,7 +122,7 @@ def build_parser() -> argparse.ArgumentParser:
     run_bench.add_argument("--model")
     run_bench.add_argument("--timeout", type=int, default=1800)
     run_bench.add_argument("--context", help="Context size: a number (65536 or 64k) or 'max' to measure the largest safe one")
-    run_bench.add_argument("--max-turns", type=int, default=60)
+    run_bench.add_argument("--max-turns", type=int, default=200)  # time, not turns, should end a bench
     run_bench.add_argument("--allow-bash", action="append", default=[])
     run_bench.add_argument("--reference")
     run_bench.add_argument("--no-submit", action="store_true")
@@ -194,6 +194,12 @@ def main(argv: list[str] | None = None) -> int:
 
         return run(Path(args.project).resolve())
     elif args.command == "bench":
+        import signal
+
+        def stop(signum, frame):  # treat kill/hangup like Ctrl+C: stop the run but still write the report
+            raise KeyboardInterrupt
+        for sig in (signal.SIGTERM, signal.SIGHUP):
+            signal.signal(sig, stop)
         from pathlib import Path
 
         from . import bench

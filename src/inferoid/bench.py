@@ -340,7 +340,7 @@ def _consume_stream(line: str, state: dict[str, Any], start: float) -> None:
 
 
 SWAP_STOP_GB = 3.0  # stop a run when swap grows this much beyond where it started
-STALL_S = 900  # no finished reply for 15 minutes = runaway; MAX_REPLY_TOKENS normally ends a reply well before
+STALL_S = 600  # no finished reply for 10 minutes = runaway; MAX_REPLY_TOKENS normally ends a reply well before
 
 
 def run_claude(args: list[str], env: dict[str, str], worktree: Path, model: str, timeout: int, context: int,

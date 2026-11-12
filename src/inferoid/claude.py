@@ -450,17 +450,13 @@ def probe_context(model: str, memory: dict[str, float], candidates: tuple[int, .
         effective = got if got and got < n else n
         weights = weights_gb(model)
         if weights and gb < weights * 0.9:
-            # Some Ollama engines report only part of the footprint (gemma4: 1.1 GB for 7.2 GB of weights).
-            # Measure what the Mac actually lost instead; fall back to a worst-case estimate if we cannot.
-            if before and after:
-                gb = loaded_footprint_gb(weights, after - before)
-                log(f"  {n:>7,} tokens: Ollama reported a size below the {weights:.1f} GB of weights; "
-                    f"measured system memory puts it at {gb:.1f} GB")
-            else:
-                estimate = weights + kv_estimate_gb(model, effective)
-                log(f"  {n:>7,} tokens: Ollama reported {gb:.1f} GB and system memory could not be measured; "
-                    f"using a worst-case estimate of {estimate:.1f} GB")
-                gb = estimate
+            # Some Ollama engines report only part of the footprint (gemma4: 1.1 GB for 7.2 GB of weights), and
+            # system-memory deltas swing by several GB a minute apart. Use a fixed formula instead: weights + context
+            # memory from the model's metadata + engine overhead. Same answer every time; a run that still goes
+            # over lowers the saved context (lower_saved_context) and the run monitor stops it first.
+            gb = weights + kv_estimate_gb(model, effective) + RUNTIME_GB
+            log(f"  {n:>7,} tokens: Ollama reported a size below the {weights:.1f} GB of weights; "
+                f"estimated {gb:.1f} GB from the model's layout")
         if gb and gb <= limit:
             log(f"  {effective:>7,} tokens: {gb:.1f} GB, fits ({limit:.1f} GB allowed)")
             return effective
