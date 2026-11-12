@@ -171,3 +171,35 @@ def test_resolve_context_numbers_and_errors(monkeypatch):
     assert claude.resolve_context("m", mac, "131072", force=True) == 131072
     assert claude.resolve_context("m", mac, "lots") == 0
     assert claude.resolve_context("m", mac, None) == 32768
+
+
+def test_probe_distrusts_size_below_weights(monkeypatch):
+    monkeypatch.setattr(claude, "weights_gb", lambda m: 7.2)
+    monkeypatch.setattr(claude, "kv_estimate_gb", lambda m, n: 8.0 if n > 65536 else 3.0)
+    cur = {}
+
+    def gen(model, num_ctx, keep_alive):
+        if num_ctx:
+            cur["n"] = num_ctx
+        return ""
+
+    # Ollama reports 1.1 GB (impossible: weights are 7.2 GB) -> use weights + KV estimate instead.
+    got = claude.probe_context("gemma", {"ram_gb": 24.0}, gen=gen, size=lambda m: 1.1, loaded=lambda m: cur["n"],
+                               log=lambda s: None)
+    assert got == 65536  # 7.2 + 8.0 > 14.1 at 96K/128K; 7.2 + 3.0 fits at 64K
+
+
+def test_warm_up_does_not_override_tag_context(monkeypatch):
+    sent = {}
+
+    class R:
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+        def read(self): return b"{}"
+
+    def fake_urlopen(req, timeout=0):
+        sent["body"] = json.loads(req.data)
+        return R()
+
+    monkeypatch.setattr(claude.urllib.request, "urlopen", fake_urlopen)
+    assert claude.warm_up("m-ctx128k") == "" and "options" not in sent["body"]

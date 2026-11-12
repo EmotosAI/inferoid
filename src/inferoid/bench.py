@@ -465,6 +465,8 @@ def run(project: Path, brief_file: Path, check: str, pack: str, task: str, kind:
             state["setup_error"] = True
         if err:
             state["errors"] = [err]
+            state["setup_error"] = True
+            print(f"Setup failed before the task started: {err}")
         else:
             worktree, is_git = make_isolated_copy(project, run_id, share, from_commit)
             before = _tree_snapshot(worktree)
@@ -521,6 +523,9 @@ def run(project: Path, brief_file: Path, check: str, pack: str, task: str, kind:
         if not isinstance(ref, dict):
             raise ValueError("reference must be a JSON object")
         report["reference"] = {key: ref[key] for key in ("model", "status", "wall_s", "tool_calls") if key in ref}
+    if state.get("errors"):
+        # Kept in the local file for debugging; allowlisted_report() never sends it.
+        report["local_only"] = {"errors": [str(e)[:300] for e in state["errors"][:5]]}
     path = write_report(report)
     print(f"{'status':<8} {'failure_kind':<18} {'wall_s':>8} {'turns':>6} {'tools':>6}")
     print(f"{status:<8} {failure:<18} {result['wall_s']:>8.1f} {result['turns']:>6} {result['tool_calls']:>6}")

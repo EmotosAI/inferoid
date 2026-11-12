@@ -226,3 +226,18 @@ def test_context_model_bakes_cap_once(monkeypatch):
     assert created and "PARAMETER num_ctx 32768" in created[0][1] and "FROM hf.co/org/LFM2.5-24B-GGUF:Q3_K_S" in created[0][1]
     tags["models"].append({"name": name + ":latest"})
     assert claude.context_model("hf.co/org/LFM2.5-24B-GGUF:Q3_K_S", 32768, run=fake_run) == name and len(created) == 1
+
+
+def test_local_errors_stay_local():
+    from inferoid import forge
+
+    report = {"schema": 1, "inferoid_version": "x", "submitted_at": "t",
+              "machine": {"chip": "c", "ram_gb": 24, "gpu_budget_gb": 16.1, "os": "o"},
+              "engine": {"name": "ollama", "version": "v"}, "model": {"name": "m", "size_gb": 1.0, "family": "f", "quant": "q"},
+              "task": {"pack": "p", "id": "i", "kind": "k"},
+              "settings": {"context_cap": 1, "lean": True, "effort": "low", "timeout_s": 1},
+              "result": {"status": "error", "check_passed": False, "failure_kind": "engine_error", "wall_s": 0.0,
+                         "first_reply_s": None, "turns": 0, "tool_calls": 0, "input_tokens": 0, "output_tokens": 0,
+                         "peak_model_mem_gb": 0.0, "peak_swap_gb": 0.0, "memory_pressure": "normal"},
+              "local_only": {"errors": ["/Users/someone/secret/path failed"]}}
+    assert "local_only" not in forge.allowlisted_report(report)

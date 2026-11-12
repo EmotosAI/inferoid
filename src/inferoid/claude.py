@@ -375,12 +375,13 @@ def restart_ollama(wait_s: float = 30.0) -> bool:
     return False
 
 
-def warm_up(model: str, timeout: float = 300.0) -> str:
-    """Load the model with the 64K context Claude Code will use. Returns Ollama's error text, or '' when it loaded."""
-    from .night import machine_memory
-
-    body = json.dumps({"model": model, "prompt": "", "keep_alive": "10m",
-                       "options": {"num_ctx": context_for(machine_memory())}}).encode()
+def warm_up(model: str, timeout: float = 300.0, num_ctx: int | None = None) -> str:
+    """Load the model. No num_ctx by default, so the context baked into the Ollama tag (context_model) applies;
+    passing one here would override it. Returns Ollama's error text, or '' when it loaded."""
+    payload: dict[str, Any] = {"model": model, "prompt": "", "keep_alive": "10m"}
+    if num_ctx:
+        payload["options"] = {"num_ctx": num_ctx}
+    body = json.dumps(payload).encode()
     req = urllib.request.Request(OLLAMA + "/api/generate", body, {"Content-Type": "application/json"})
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
@@ -445,11 +446,61 @@ def probe_context(model: str, memory: dict[str, float], candidates: tuple[int, .
         gb, got = size(model), loaded(model)
         gen(model, None, 0)  # unload before trying the next size
         effective = got if got and got < n else n
+        weights = weights_gb(model)
+        if weights and gb < weights * 0.9:
+            # Some Ollama engines report only part of the footprint (gemma4: 1.1 GB for 7.2 GB of weights).
+            estimate = weights + kv_estimate_gb(model, effective)
+            log(f"  {n:>7,} tokens: Ollama reported {gb:.1f} GB, below the {weights:.1f} GB of weights; using an estimate of {estimate:.1f} GB")
+            gb = estimate
         if gb and gb <= limit:
             log(f"  {effective:>7,} tokens: {gb:.1f} GB, fits ({limit:.1f} GB allowed)")
             return effective
         log(f"  {n:>7,} tokens: {gb:.1f} GB, too much ({limit:.1f} GB allowed)")
     return context_for(memory)
+
+
+def weights_gb(model: str) -> float:
+    """Weight file size from Ollama's model list (GB, 0 if unknown)."""
+    try:
+        base = model.removesuffix(":latest")
+        for m in _ollama("/api/tags").get("models", []):
+            if m.get("name", "").removesuffix(":latest") == base:
+                return float(m.get("size") or 0) / 1e9
+    except (OSError, ValueError, TypeError):
+        pass
+    return 0.0
+
+
+def kv_estimate_gb(model: str, tokens: int) -> float:
+    """Conservative KV cache estimate from /api/show: every layer full attention, fp16. Overestimates sliding-window
+    and hybrid models, which is the safe direction. Falls back to 24 KB/token when the metadata is missing."""
+    try:
+        req = urllib.request.Request(OLLAMA + "/api/show", json.dumps({"model": model}).encode(),
+                                     {"Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            info = json.loads(resp.read()).get("model_info") or {}
+    except (OSError, ValueError):
+        info = {}
+
+    def pick(suffix: str) -> Any:
+        return next((v for k, v in info.items() if k.endswith(suffix)), None)
+
+    layers = pick(".block_count")
+    kv_heads = pick(".attention.head_count_kv")
+    key_len = pick(".attention.key_length") or (
+        (pick(".embedding_length") or 0) // max(1, pick(".attention.head_count") or 1) if pick(".embedding_length") else None)
+    value_len = pick(".attention.value_length") or key_len
+    if isinstance(kv_heads, list):
+        per_layer = sum(int(h or 0) for h in kv_heads)
+    elif layers and kv_heads:
+        per_layer = int(layers) * int(kv_heads)
+    else:
+        per_layer = 0
+    if per_layer and key_len:
+        per_token = per_layer * (int(key_len) + int(value_len)) * 2
+    else:
+        per_token = 24576
+    return per_token * tokens / 1e9
 
 
 def resolve_context(model: str, memory: dict[str, float], context: str | int | None, force: bool = False) -> int:
