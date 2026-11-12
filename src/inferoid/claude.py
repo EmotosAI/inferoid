@@ -715,7 +715,7 @@ def local_command(project: Path, model: str, resume: bool, full: bool = False,
 
 
 def local(project: Path, model: str | None, resume: bool, dry_run: bool = False, full: bool = False,
-          allow_gpu_limit: bool = False, context: str | None = None) -> int:
+          allow_gpu_limit: bool = False, context: str | None = None, clean: bool = True) -> int:
     from .night import machine_memory
 
     memory = machine_memory()
@@ -769,8 +769,20 @@ def local(project: Path, model: str | None, resume: bool, dry_run: bool = False,
         print(" ".join(args))
         return 0
     os.chdir(project)
-    os.execvpe("claude", args, env)
-    return 0
+    if not clean:
+        os.execvpe("claude", args, env)
+    from .cleanproxy import CleanProxy
+
+    proxy = CleanProxy(OLLAMA).start()
+    env["ANTHROPIC_BASE_URL"] = proxy.url
+    import signal
+
+    previous = signal.signal(signal.SIGINT, signal.SIG_IGN)  # Ctrl+C belongs to Claude Code while it runs
+    try:
+        return subprocess.call(args, env=env)
+    finally:
+        signal.signal(signal.SIGINT, previous)
+        proxy.stop()
 
 
 def status(project: Path) -> list[str]:

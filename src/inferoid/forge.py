@@ -141,7 +141,8 @@ def allowlisted_report(data: dict[str, Any]) -> dict[str, Any]:
         "settings": {"context_cap": int(number_value(settings, "context_cap")),
                      "lean": bool(settings.get("lean", True)),
                      "effort": text_value(settings, "effort", "low"),
-                     "timeout_s": int(number_value(settings, "timeout_s"))},
+                     "timeout_s": int(number_value(settings, "timeout_s")),
+                     "clean": bool(settings.get("clean", False))},
         "result": {
             "status": text_value(result, "status", "error"),
             "check_passed": bool(result.get("check_passed", False)),

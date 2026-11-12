@@ -554,7 +554,7 @@ def run(project: Path, brief_file: Path, check: str, pack: str, task: str, kind:
         allow_bash: list[str] | None = None, reference: Path | None = None,
         no_submit: bool = False, force: bool = False, keep: bool = False,
         share: list[str] | None = None, from_commit: bool = False,
-        context: str | None = None) -> tuple[int, Path]:
+        context: str | None = None, clean: bool = True) -> tuple[int, Path]:
     project = project.resolve()
     brief = brief_file.read_text()
     if not no_submit:
@@ -609,8 +609,21 @@ def run(project: Path, brief_file: Path, check: str, pack: str, task: str, kind:
             transcript = home() / "bench" / "transcripts" / f"{run_id}.jsonl"
             transcript.parent.mkdir(parents=True, exist_ok=True)
             transcript.touch(mode=0o600)
-            state = run_claude(args, env, worktree, engine_model, timeout, cap, transcript, baseline=baseline,
+            proxy = None
+            if clean:  # thinking off, no placeholder tool, no user CLAUDE.md reminders (see cleanproxy.py)
+                from .cleanproxy import CleanProxy
+
+                proxy = CleanProxy(claude.OLLAMA).start()
+                env["ANTHROPIC_BASE_URL"] = proxy.url
+            try:
+                state = run_claude(args, env, worktree, engine_model, timeout, cap, transcript, baseline=baseline,
                                limit=claude.default_budget(memory))
+            finally:
+                if proxy:
+                    state_counts = dict(proxy.counts)
+                    proxy.stop()
+            if proxy:
+                state["clean_changes"] = state_counts
             print(f"Transcript (kept on this machine, never sent): {transcript}")
             limit = claude.default_budget(memory) - claude.PROBE_MARGIN_GB
             over = state.get("memory_stop") or float(state.get("peak_model_mem_gb", 0)) > limit
@@ -659,16 +672,19 @@ def run(project: Path, brief_file: Path, check: str, pack: str, task: str, kind:
                               "submitted_at": dt.datetime.now(dt.UTC).isoformat().replace("+00:00", "Z"),
                               "machine": _machine_info(memory), "engine": {"name": "ollama", "version": _engine_version()},
                               "model": _model_info(model), "task": {"pack": pack, "id": task, "kind": kind},
-                              "settings": {"context_cap": cap, "lean": True, "effort": "low", "timeout_s": timeout},
+                              "settings": {"context_cap": cap, "lean": True, "effort": "low", "timeout_s": timeout,
+                                           "clean": clean},
                               "result": result}
     if reference:
         ref = json.loads(reference.read_text())
         if not isinstance(ref, dict):
             raise ValueError("reference must be a JSON object")
         report["reference"] = {key: ref[key] for key in ("model", "status", "wall_s", "tool_calls") if key in ref}
-    if state.get("errors"):
+    if state.get("errors") or state.get("clean_changes"):
         # Kept in the local file for debugging; allowlisted_report() never sends it.
-        report["local_only"] = {"errors": [str(e)[:300] for e in state["errors"][:5]]}
+        report["local_only"] = {"errors": [str(e)[:300] for e in state.get("errors", [])[:5]],
+                                "clean_changes": state.get("clean_changes", {}),
+                                "max_sample_gap_s": state.get("max_sample_gap_s", 0.0)}
     path = write_report(report)
     print(f"{'status':<8} {'failure_kind':<18} {'wall_s':>8} {'turns':>6} {'tools':>6}")
     print(f"{status:<8} {failure:<18} {result['wall_s']:>8.1f} {result['turns']:>6} {result['tool_calls']:>6}")
