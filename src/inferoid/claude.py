@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import os
 import platform
+import re
 import shutil
 import subprocess
 import sys
@@ -394,6 +395,37 @@ def warm_up(model: str, timeout: float = 300.0) -> str:
         return str(exc)
 
 
+def context_model(model: str, cap: int, run: Callable[..., Any] = subprocess.run) -> str:
+    """Ollama tag with num_ctx baked in. Some models (e.g. hf.co GGUF imports) carry their own num_ctx (often 4096)
+    and Claude Code never sends one, so OLLAMA_CONTEXT_LENGTH alone is not enough. Reuses the same weight blobs."""
+    base = re.sub(r"[^a-z0-9._-]+", "-", model.lower().removeprefix("hf.co/")).strip("-.")
+    name = f"{base}-ctx{cap // 1024}k"
+    try:
+        names = {m.get("name", "").removesuffix(":latest") for m in _ollama("/api/tags").get("models", [])}
+    except OSError:
+        return model
+    if name in names:
+        return name
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as tmp:
+        modelfile = Path(tmp) / "Modelfile"
+        modelfile.write_text(f"FROM {model}\nPARAMETER num_ctx {cap}\n")
+        done = run(["ollama", "create", name, "-f", str(modelfile)], capture_output=True, text=True)
+    return name if getattr(done, "returncode", 1) == 0 else model
+
+
+def loaded_context(model: str) -> int:
+    """Context length Ollama actually loaded the model with (0 if unknown)."""
+    try:
+        for m in _ollama("/api/ps").get("models", []):
+            if m.get("name", "").removesuffix(":latest") == model.removesuffix(":latest"):
+                return int(m.get("context_length") or 0)
+    except (OSError, ValueError, TypeError):
+        pass
+    return 0
+
+
 def ensure_loaded(model: str, restart: Callable[[], bool] = restart_ollama, load: Callable[[str], str] = warm_up) -> str:
     """Load the model; on a 'requires N GiB' memory error, restart Ollama once (it may hold an old limit) and retry."""
     print(f"Loading {model_label(model)}...")
@@ -474,6 +506,7 @@ def local(project: Path, model: str | None, resume: bool, dry_run: bool = False,
     if any(not n.startswith("hint:") for n in notes) and not dry_run:
         return 1
     if not dry_run:
+        model = context_model(model, context_for(memory))  # bake the cap into the Ollama tag the session uses
         err = ensure_loaded(model)
         if err:
             print(f"Ollama could not load {model}: {err}")

@@ -197,7 +197,8 @@ def _git_repo(path: Path) -> bool:
                                                         capture_output=True, check=False).returncode == 0
 
 
-def make_isolated_copy(project: Path, run_id: str, share: list[str] | None = None) -> tuple[Path, bool]:
+def make_isolated_copy(project: Path, run_id: str, share: list[str] | None = None,
+                       from_commit: bool = False) -> tuple[Path, bool]:
     """Git repos get a detached worktree of HEAD: uncommitted changes and untracked/ignored files (data, audio,
     caches) are NOT in it. `share` lists project-relative paths to symlink in so the task can read them."""
     target = home() / "bench" / "wt" / run_id
@@ -206,6 +207,18 @@ def make_isolated_copy(project: Path, run_id: str, share: list[str] | None = Non
         subprocess.run(["git", "-C", str(project), "worktree", "add", "--detach", str(target), "HEAD"],
                        capture_output=True, text=True, check=True)
         is_git = True
+        if not from_commit:
+            # Bring the working tree over: uncommitted tracked changes, then untracked files that git does not ignore.
+            diff = subprocess.run(["git", "-C", str(project), "diff", "--binary", "HEAD"], capture_output=True, check=True).stdout
+            if diff.strip():
+                subprocess.run(["git", "-C", str(target), "apply", "--whitespace=nowarn"], input=diff,
+                               capture_output=True, check=True)
+            others = subprocess.run(["git", "-C", str(project), "ls-files", "--others", "--exclude-standard", "-z"],
+                                    capture_output=True, check=True).stdout.split(b"\0")
+            for rel in (o.decode() for o in others if o):
+                dst = target / rel
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(project / rel, dst)
     else:
         shutil.copytree(project, target)
         is_git = False
@@ -294,7 +307,8 @@ def _consume_stream(line: str, state: dict[str, Any], start: float) -> None:
                 state[key] = max(state[key], int(value))
 
 
-def run_claude(args: list[str], env: dict[str, str], worktree: Path, model: str, timeout: int, context: int) -> dict[str, Any]:
+def run_claude(args: list[str], env: dict[str, str], worktree: Path, model: str, timeout: int, context: int,
+               transcript: Path | None = None) -> dict[str, Any]:
     state: dict[str, Any] = {"first_reply_s": None, "turns": 0, "tool_calls": 0,
                              "input_tokens": 0, "output_tokens": 0, "result_seen": False, "errors": []}
     started = time.monotonic()
@@ -328,6 +342,9 @@ def run_claude(args: list[str], env: dict[str, str], worktree: Path, model: str,
             if line is None:
                 ended = process.poll() is not None
             else:
+                if transcript is not None:
+                    with transcript.open("a") as fh:
+                        fh.write(line if line.endswith("\n") else line + "\n")
                 _consume_stream(line, state, started)
         except queue.Empty:
             if process.poll() is not None and lines.empty():
@@ -358,8 +375,8 @@ def classify_failure(state: dict[str, Any], check_passed: bool, changed: bool, c
         return "context_exhausted"
     if any(term in lower for term in ("invalid tool input", "invalid tool", "tool_use", "tool input")):
         return "tool_format"
-    if not state.get("result_seen") and not changed:
-        return "no_output"
+    if not changed and not state.get("tool_calls"):
+        return "no_output"  # e.g. replied a few words and stopped, without a tool call or a file change
     if not check_passed:
         return "check_failed"
     return "engine_error"
@@ -408,7 +425,7 @@ def run(project: Path, brief_file: Path, check: str, pack: str, task: str, kind:
         model: str | None = None, timeout: int = 1800, max_turns: int = 60,
         allow_bash: list[str] | None = None, reference: Path | None = None,
         no_submit: bool = False, force: bool = False, keep: bool = False,
-        share: list[str] | None = None) -> tuple[int, Path]:
+        share: list[str] | None = None, from_commit: bool = False) -> tuple[int, Path]:
     project = project.resolve()
     brief = brief_file.read_text()
     memory = machine_memory()
@@ -418,7 +435,7 @@ def run(project: Path, brief_file: Path, check: str, pack: str, task: str, kind:
     model_gb = claude.MODEL_GB.get(model, picked_gb if model == picked else 0.0)
     if not model_gb:
         model_gb = float(_model_info(model).get("size_gb") or 0.0)  # size from Ollama for models we don't list
-    dirty = dirty_paths(project)
+    dirty = dirty_paths(project) if from_commit else []
     if dirty:
         print(f"Note: {len(dirty)} uncommitted change(s) are not in the benchmark copy (it uses the last commit). "
               "Commit them first, or the task runs against the committed version.")
@@ -436,16 +453,26 @@ def run(project: Path, brief_file: Path, check: str, pack: str, task: str, kind:
     check_passed = False
     changed = False
     try:
-        err = claude.ensure_loaded(model)
+        engine_model = claude.context_model(model, cap)
+        err = claude.ensure_loaded(engine_model)
+        loaded = claude.loaded_context(engine_model) if not err else 0
+        if not err and loaded and loaded < cap:
+            err = (f"Ollama loaded {model} with a {loaded:,}-token context instead of {cap:,}; "
+                   "the result would not say anything about the model")
+            state["setup_error"] = True
         if err:
             state["errors"] = [err]
         else:
-            worktree, is_git = make_isolated_copy(project, run_id, share)
+            worktree, is_git = make_isolated_copy(project, run_id, share, from_commit)
             before = _tree_snapshot(worktree)
-            args, env = command_for(worktree, model, brief, cap, allow_bash or [])
+            args, env = command_for(worktree, engine_model, brief, cap, allow_bash or [])
             # max-turns is a benchmark setting, so replace the command helper's default.
             args[args.index("--max-turns") + 1] = str(max_turns)
-            state = run_claude(args, env, worktree, model, timeout, cap)
+            transcript = home() / "bench" / "transcripts" / f"{run_id}.jsonl"
+            transcript.parent.mkdir(parents=True, exist_ok=True)
+            transcript.touch(mode=0o600)
+            state = run_claude(args, env, worktree, engine_model, timeout, cap, transcript)
+            print(f"Transcript (kept on this machine, never sent): {transcript}")
             after_agent = _tree_snapshot(worktree)
             changed = before != after_agent
             try:
@@ -462,7 +489,8 @@ def run(project: Path, brief_file: Path, check: str, pack: str, task: str, kind:
         if worktree and not keep:
             remove_isolated_copy(project, worktree, is_git)
 
-    failure = "none" if check_passed else classify_failure(state, check_passed, changed, cap)
+    failure = ("engine_error" if state.get("setup_error") else
+               "none" if check_passed else classify_failure(state, check_passed, changed, cap))
     if state.get("timed_out"):
         status = "timeout"
     elif check_passed:

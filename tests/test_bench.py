@@ -91,7 +91,7 @@ def test_run_uses_and_removes_worktree_without_touching_repo(tmp_path, monkeypat
     monkeypatch.setattr(claude, "ensure_loaded", lambda model: "")
     monkeypatch.setattr(bench, "_engine_version", lambda: "test")
 
-    def fake_run(args, env, worktree, model, timeout, context):
+    def fake_run(args, env, worktree, model, timeout, context, transcript=None):
         (worktree / "done.txt").write_text("done\n")
         return {"first_reply_s": 0.1, "turns": 1, "tool_calls": 1, "input_tokens": 2, "output_tokens": 3,
                 "result_seen": True, "errors": [], "timed_out": False, "returncode": 0, "wall_s": 0.2,
@@ -186,8 +186,43 @@ def test_share_links_untracked_data_into_the_copy(tmp_path, monkeypatch):
     (proj / "analysis" / "grid.json").write_text("{}")
     (proj / "a.txt").write_text("changed, not committed")
     assert bench.dirty_paths(proj) == ["a.txt"]
-    target, is_git = bench.make_isolated_copy(proj, "r1", ["analysis", "missing"])
+    target, is_git = bench.make_isolated_copy(proj, "r1", ["analysis", "missing"], from_commit=True)
     assert is_git and (target / "analysis").is_symlink() and (target / "analysis" / "grid.json").exists()
     assert (target / "a.txt").read_text() == "tracked"
     bench.remove_isolated_copy(proj, target, is_git)
+    # Default: the working tree (uncommitted changes and untracked, non-ignored files) is benchmarked.
+    (proj / "new.py").write_text("x = 1\n")
+    target2, _ = bench.make_isolated_copy(proj, "r2")
+    assert (target2 / "a.txt").read_text() == "changed, not committed" and (target2 / "new.py").exists()
+    assert not (target2 / "analysis").exists()  # ignored and not shared
+    bench.remove_isolated_copy(proj, target2, True)
     assert not target.exists() and (proj / "analysis" / "grid.json").exists()
+
+
+
+def test_no_output_when_agent_did_nothing():
+    from inferoid import bench
+
+    state = {"result_seen": True, "tool_calls": 0, "errors": [], "input_tokens": 900}
+    assert bench.classify_failure(state, check_passed=False, changed=False, context=32768) == "no_output"
+    state["tool_calls"] = 3
+    assert bench.classify_failure(state, check_passed=False, changed=True, context=32768) == "check_failed"
+
+
+def test_context_model_bakes_cap_once(monkeypatch):
+    from inferoid import claude
+
+    created = []
+    tags = {"models": [{"name": "hf.co/org/LFM2.5-24B-GGUF:Q3_K_S"}]}
+    monkeypatch.setattr(claude, "_ollama", lambda path: tags)
+
+    def fake_run(cmd, **kw):
+        created.append((cmd, open(cmd[-1]).read()))
+        class R: returncode = 0
+        return R()
+
+    name = claude.context_model("hf.co/org/LFM2.5-24B-GGUF:Q3_K_S", 32768, run=fake_run)
+    assert name == "org-lfm2.5-24b-gguf-q3_k_s-ctx32k"
+    assert created and "PARAMETER num_ctx 32768" in created[0][1] and "FROM hf.co/org/LFM2.5-24B-GGUF:Q3_K_S" in created[0][1]
+    tags["models"].append({"name": name + ":latest"})
+    assert claude.context_model("hf.co/org/LFM2.5-24B-GGUF:Q3_K_S", 32768, run=fake_run) == name and len(created) == 1

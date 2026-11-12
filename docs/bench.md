@@ -49,15 +49,25 @@ inferoid bench submit ~/.inferoid/bench/reports/REPORT.json
 
 Sharing is opt-in. The token is stored with mode `0600`, is never printed, and submission failures leave the local report in place. A model that `memory_problem()` says cannot fit safely is refused unless `--force` is supplied. Keep one model running at a time and respect the context cap selected for the machine.
 
-## Data that is not in git
+## What gets benchmarked
 
-The benchmark runs in a copy of your last commit, so uncommitted changes and ignored files (audio, analysis caches, datasets) are not there. Commit what the task needs, and link ignored folders in with `--share`:
+By default the copy is your current working tree: the last commit plus uncommitted changes and untracked files that git does not ignore. Use `--from-commit` to benchmark the last commit only. Ignored folders (audio, analysis caches, datasets) are not copied; link them in with `--share`:
 
 ```sh
-inferoid bench run --repo ~/dev/djmix --brief night/tasks/plan.md \
-  --check "python scripts/night_checks.py plan projects/plans/latest.json" \
-  --pack djmix --task transition-plan-v1 --kind plan \
-  --share analysis --share pool --model gemma4:12b-it-qat
+inferoid bench run --repo ~/dev/myproject --brief path/to/brief.md \
+  --check "python path/to/check.py" \
+  --pack myproject --task task-id --kind plan \
+  --share data --model gemma4:12b-it-qat
 ```
+
+## Writing a good check
+
+The check decides pass or fail, so make it strict: it must fail on unchanged input (a copy of the starting files) and pass only when the task's real goal is met. A check that accepts the untouched starting state measures nothing.
+
+## Context and transcripts
+
+inferoid creates an Ollama tag with your machine's context cap built in (for example `gemma4-12b-it-qat-ctx32k`), because some models, such as `hf.co/...` imports, load with a 4,096-token context otherwise. If Ollama still loads a smaller context, the run stops before starting and is reported as an engine error, not as a model failure.
+
+Each run keeps the full Claude Code transcript on your machine (`~/.inferoid/bench/transcripts/`, readable only by you) so you or your agent can see why a model failed. Transcripts are never sent to Forge.
 
 Run one model at a time: wait for a run to finish (or press Ctrl+C) before starting the next.

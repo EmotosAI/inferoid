@@ -125,6 +125,8 @@ def build_parser() -> argparse.ArgumentParser:
     run_bench.add_argument("--no-submit", action="store_true")
     run_bench.add_argument("--force", action="store_true")
     run_bench.add_argument("--keep", action="store_true")
+    run_bench.add_argument("--from-commit", action="store_true",
+                           help="Benchmark the last commit instead of the current working tree")
     run_bench.add_argument("--share", action="append", default=[], metavar="PATH",
                            help="Project-relative path to link into the benchmark copy (data, audio, caches not in git)")
     submit_bench = bench_cmds.add_parser("submit")
@@ -191,7 +193,7 @@ def main(argv: list[str] | None = None) -> int:
             code, _ = bench.run(Path(args.repo), Path(args.brief), args.check, args.pack, args.task,
                                  args.kind, args.model, args.timeout, args.max_turns, args.allow_bash,
                                  Path(args.reference) if args.reference else None, args.no_submit, args.force, args.keep,
-                                 args.share)
+                                 args.share, args.from_commit)
             return code
         if args.bench_command == "submit":
             return bench.submit_files([Path(path) for path in args.files])
