@@ -30,6 +30,27 @@ def clean(body: dict[str, Any], counts: dict[str, int]) -> None:
     if len(kept) != len(tools):
         body["tools"] = kept
         counts["placeholder_removed"] = counts.get("placeholder_removed", 0) + 1
+    # Claude Code sends its "# Environment" note as a role "system" message after the first user turn. Some chat
+    # templates (Qwen3.5/3.6) raise "System message must be at the beginning" and every request fails with HTTP 500.
+    # Move such messages into the top-level system prompt.
+    messages = body.get("messages") or []
+    moved = [m for m in messages if isinstance(m, dict) and m.get("role") == "system"]
+    if moved:
+        texts = []
+        for m in moved:
+            content = m.get("content")
+            texts.append(content if isinstance(content, str) else "\n".join(
+                c.get("text", "") for c in content or [] if isinstance(c, dict) and c.get("type") == "text"))
+        system = body.get("system")
+        extra = [{"type": "text", "text": t} for t in texts if t]
+        if isinstance(system, list):
+            body["system"] = system + extra
+        elif isinstance(system, str) and system:
+            body["system"] = [{"type": "text", "text": system}] + extra
+        else:
+            body["system"] = extra
+        body["messages"] = [m for m in messages if m not in moved]
+        counts["system_moved"] = counts.get("system_moved", 0) + len(moved)
     for message in body.get("messages") or []:
         if not (isinstance(message, dict) and message.get("role") == "user" and isinstance(message.get("content"), list)):
             continue

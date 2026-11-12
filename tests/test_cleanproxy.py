@@ -49,3 +49,12 @@ def test_proxy_forwards_cleaned_body():
     finally:
         proxy.stop()
         up.shutdown()
+
+
+def test_late_system_message_moves_to_top():
+    body = {"system": [{"type": "text", "text": "You are Claude Code."}],
+            "messages": [{"role": "user", "content": "plan it"}, {"role": "system", "content": "# Environment\ncwd: /x"}]}
+    counts = {}
+    clean(body, counts)
+    assert [m["role"] for m in body["messages"]] == ["user"]
+    assert body["system"][-1]["text"].startswith("# Environment") and counts["system_moved"] == 1

@@ -239,3 +239,18 @@ def test_over_limit_run_lowers_saved_context(monkeypatch, tmp_path):
     claude.save_context("m", mac, 131072)
     assert claude.lower_saved_context("m", mac, 131072) == 98304
     assert claude.saved_context("m", mac) == 98304
+
+
+def test_kv_estimate_counts_only_attention_layers_in_hybrids(monkeypatch):
+    info = {"qwen35moe.block_count": 40, "qwen35moe.full_attention_interval": 4, "qwen35moe.attention.head_count_kv": 2,
+            "qwen35moe.attention.key_length": 256, "qwen35moe.attention.value_length": 256}
+
+    class R:
+        def __init__(self, *a, **k): pass
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+        def read(self): return json.dumps({"model_info": info}).encode()
+
+    monkeypatch.setattr(claude.urllib.request, "urlopen", lambda *a, **k: R())
+    gb = claude.kv_estimate_gb("q", 65536)
+    assert 1.2 < gb < 1.5  # 10 attention layers, not 40

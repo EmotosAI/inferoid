@@ -564,7 +564,10 @@ def kv_estimate_gb(model: str, tokens: int) -> float:
     if isinstance(kv_heads, list):
         per_layer = sum(int(h or 0) for h in kv_heads)
     elif layers and kv_heads:
-        per_layer = int(layers) * int(kv_heads)
+        # Hybrids (Qwen3.5/3.6 Gated DeltaNet) put full attention on every Nth layer only.
+        interval = pick(".full_attention_interval")
+        attn_layers = int(layers) // int(interval) if isinstance(interval, int) and interval > 1 else int(layers)
+        per_layer = attn_layers * int(kv_heads)
     else:
         per_layer = 0
     if per_layer and key_len:
