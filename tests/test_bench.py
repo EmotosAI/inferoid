@@ -370,3 +370,13 @@ def test_failed_submit_is_queued_and_resent(monkeypatch, tmp_path):
     monkeypatch.setattr(bench.forge, "submit", lambda data: (True, "ok", None))
     bench.flush_outbox()
     assert not (tmp_path / "bench" / "outbox" / "r.json").exists()
+
+
+def test_local_report_keeps_local_only_but_submit_strips_it(tmp_path, monkeypatch):
+    monkeypatch.setattr(bench, "home", lambda: tmp_path)
+    report = {"schema": 1, "model": {"name": "m"}, "task": {"id": "t"},
+              "local_only": {"errors": ["boom"], "clean_changes": {"thinking_disabled": 3}}}
+    path = bench.write_report(report, tmp_path / "r.json")
+    saved = json.loads(path.read_text())
+    assert saved["local_only"]["clean_changes"]["thinking_disabled"] == 3
+    assert "local_only" not in forge.allowlisted_report(saved)

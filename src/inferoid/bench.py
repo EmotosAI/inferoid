@@ -538,7 +538,11 @@ def _machine_info(memory: dict[str, float]) -> dict[str, Any]:
 def write_report(report: dict[str, Any], path: Path | None = None) -> Path:
     path = path or report_path(str(report["model"]["name"]), str(report["task"]["id"]))
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(forge.allowlisted_report(report), indent=2, ensure_ascii=False) + "\n")
+    saved = forge.allowlisted_report(report)
+    for key in ("local_only", "verdict"):  # kept in the local file only; submit() sends the allowlisted part
+        if isinstance(report.get(key), dict):
+            saved[key] = report[key]
+    path.write_text(json.dumps(saved, indent=2, ensure_ascii=False) + "\n")
     return path
 
 
