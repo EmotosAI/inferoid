@@ -116,6 +116,8 @@ def run_local_task(project: Path, task: str, check: str | None = None,
     links = [str(x) for x in cfg.get("link", []) if isinstance(x, str)]
     allow_bash = [*(allow_bash or []), *[str(x) for x in cfg.get("allow_bash", []) if isinstance(x, str)]]
     deny_tools = [*(deny_tools or []), *[str(x) for x in cfg.get("deny_tools", []) if isinstance(x, str)]]
+    if not model and isinstance(cfg.get("model"), str):
+        model = cfg["model"]  # the repo's chosen local model (e.g. the one that passed this repo's tasks)
     if isinstance(cfg.get("timeout_s"), int) and timeout == 900:
         timeout = cfg["timeout_s"]
     result: dict[str, Any] = {"status": "error", "applied": False, "files_changed": [],

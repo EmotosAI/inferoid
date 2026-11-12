@@ -254,3 +254,14 @@ def test_kv_estimate_counts_only_attention_layers_in_hybrids(monkeypatch):
     monkeypatch.setattr(claude.urllib.request, "urlopen", lambda *a, **k: R())
     gb = claude.kv_estimate_gb("q", 65536)
     assert 1.2 < gb < 1.5  # 10 attention layers, not 40
+
+
+def test_local_session_drops_supervisor_provider_settings(monkeypatch):
+    monkeypatch.setenv("CLAUDE_CODE_USE_BEDROCK", "1")
+    monkeypatch.setenv("AWS_BEARER_TOKEN_BEDROCK", "secret")
+    monkeypatch.setenv("ANTHROPIC_DEFAULT_SONNET_MODEL", "us.anthropic.x")
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-x")
+    _, env, _ = claude.local_command(Path("."), "m", False, False, 32768)
+    for k in ("CLAUDE_CODE_USE_BEDROCK", "AWS_BEARER_TOKEN_BEDROCK", "ANTHROPIC_DEFAULT_SONNET_MODEL", "OPENROUTER_API_KEY"):
+        assert k not in env
+    assert env["ANTHROPIC_BASE_URL"].startswith("http://127.0.0.1")

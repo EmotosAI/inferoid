@@ -39,6 +39,8 @@ if not OLLAMA.startswith("http"):
 MAX_REPLY_TOKENS = 4096  # per reply; Claude Code reserves this from the window, so smaller leaves more context
 LOCAL_CONTEXT = 32768  # floor; the real cap comes from context_for(memory)
 OPENAI_ENGINE_URL = "http://127.0.0.1:8080"
+PROVIDER_ENV = {"CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX", "CLAUDE_CODE_USE_FOUNDRY", "CLAUDE_CODE_SUBAGENT_MODEL",
+                "CLOUD_ML_REGION", "GOOGLE_APPLICATION_CREDENTIALS", "OPENAI_API_KEY", "OPENROUTER_API_KEY"}
 
 # Memory safety (2026-11-11: a 24 GB Mac froze when Nemotron grew to ~94K tokens of context with the GPU limit
 # raised to 21 GB). Models are picked to fit macOS's DEFAULT GPU budget; the limit is never raised automatically.
@@ -734,7 +736,10 @@ def local_command(project: Path, model: str, resume: bool, full: bool = False,
                   context: int = LOCAL_CONTEXT, base_url: str | None = None,
                   engine: str = "ollama") -> tuple[list[str], dict[str, str], str]:
     # Claude Code compacts the conversation before it reaches this, so the local context never grows past the cap.
-    env = dict(os.environ, ANTHROPIC_BASE_URL=base_url or OLLAMA, ANTHROPIC_AUTH_TOKEN="ollama", ANTHROPIC_API_KEY="",
+    # A supervisor's Claude Code may run on Bedrock/Vertex/a gateway; its provider settings and keys must not reach
+    # the local session (they override ANTHROPIC_BASE_URL and leak credentials to the worker).
+    base_env = {k: v for k, v in os.environ.items() if k not in PROVIDER_ENV and not k.startswith(("AWS_", "ANTHROPIC_"))}
+    env = dict(base_env, ANTHROPIC_BASE_URL=base_url or OLLAMA, ANTHROPIC_AUTH_TOKEN="ollama", ANTHROPIC_API_KEY="",
                CLAUDE_CODE_MAX_CONTEXT_TOKENS=str(context),
                # One reply may not run away (gemma4 thought for 18K tokens without ending its turn).
                CLAUDE_CODE_MAX_OUTPUT_TOKENS=os.environ.get("INFEROID_MAX_REPLY_TOKENS", str(MAX_REPLY_TOKENS)))
