@@ -753,8 +753,8 @@ LEAN_ARGS = ["--strict-mcp-config", "--disable-slash-commands", "--tools", LEAN_
 def reply_cap(context: int) -> int:
     """Per-reply output cap. Claude Code reserves it from the window, so small windows need a small cap, but Claude
     Code ENDS the session when a reply exceeds it (LFM2.5 wrote a whole plan in one reply at 4,096 and was cut off).
-    4,096 up to 48K of context, 8,192 from 64K."""
-    return MAX_REPLY_TOKENS if context < 60000 else 2 * MAX_REPLY_TOKENS
+    4,096 below 40K of context (32K windows), 8,192 from 40K."""
+    return MAX_REPLY_TOKENS if context < 40000 else 2 * MAX_REPLY_TOKENS
 
 
 def local_command(project: Path, model: str, resume: bool, full: bool = False,

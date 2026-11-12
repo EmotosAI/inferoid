@@ -230,7 +230,7 @@ def test_measured_context_is_saved_and_reused(monkeypatch, tmp_path):
 
 def test_local_env_caps_reply_tokens():
     _, env, _ = claude.local_command(Path("."), "m", False, False, 32768)
-    assert env["CLAUDE_CODE_MAX_OUTPUT_TOKENS"] == "4096" and claude.reply_cap(65536) == 8192
+    assert env["CLAUDE_CODE_MAX_OUTPUT_TOKENS"] == "4096" and claude.reply_cap(65536) == 8192 and claude.reply_cap(49152) == 8192
 
 
 def test_over_limit_run_lowers_saved_context(monkeypatch, tmp_path):
