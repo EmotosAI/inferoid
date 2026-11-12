@@ -438,7 +438,15 @@ def probe_context(model: str, memory: dict[str, float], candidates: tuple[int, .
     Ollama reserves the whole context when it loads a model, so loading and reading /api/ps measures it."""
     limit = default_budget(memory) - PROBE_MARGIN_GB
     used = used or system_used_gb
+    weights_now = weights_gb(model)
     for n in sorted(candidates, reverse=True):
+        if weights_now:
+            # Never load a size the layout already rules out: loading Qwen3-Coder REAP (all-attention) at 128K
+            # sent a 24 GB Mac to critical memory pressure in 29 s.
+            planned = weights_now + kv_estimate_gb(model, n) + RUNTIME_GB
+            if planned > limit:
+                log(f"  {n:>7,} tokens: estimated {planned:.1f} GB before loading, too much ({limit:.1f} GB allowed); not loaded")
+                continue
         before = used()
         err = gen(model, n, "30s")
         if err:
@@ -466,7 +474,8 @@ def probe_context(model: str, memory: dict[str, float], candidates: tuple[int, .
             log(f"  {effective:>7,} tokens: {gb:.1f} GB, fits ({limit:.1f} GB allowed)")
             return effective
         log(f"  {n:>7,} tokens: {gb:.1f} GB, too much ({limit:.1f} GB allowed)")
-    return context_for(memory)
+    log(f"  No context size fits safely on this Mac ({limit:.1f} GB allowed). Use a smaller build of {model}.")
+    return 0
 
 
 def loaded_footprint_gb(weights: float, delta: float) -> float:
@@ -613,7 +622,8 @@ def resolve_context(model: str, memory: dict[str, float], context: str | int | N
             return saved
         print(f"Measuring the largest context {model} can use on this Mac...")
         got = probe_context(model, memory)
-        save_context(model, memory, got)
+        if got:
+            save_context(model, memory, got)
         return got
     try:
         wanted = int(str(context).lower().removesuffix("k")) * (1024 if str(context).lower().endswith("k") else 1)
