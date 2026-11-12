@@ -36,7 +36,7 @@ HANDOFF_PROMPT = ("Another assistant started work in this repo and was stopped. 
 OLLAMA = os.environ.get("OLLAMA_HOST", "http://127.0.0.1:11434")
 if not OLLAMA.startswith("http"):
     OLLAMA = "http://" + OLLAMA
-MAX_REPLY_TOKENS = 8192  # per reply; about 6 minutes at 24 tokens/s
+MAX_REPLY_TOKENS = 4096  # per reply; Claude Code reserves this from the window, so smaller leaves more context
 LOCAL_CONTEXT = 32768  # floor; the real cap comes from context_for(memory)
 
 # Memory safety (2026-11-11: a 24 GB Mac froze when Nemotron grew to ~94K tokens of context with the GPU limit

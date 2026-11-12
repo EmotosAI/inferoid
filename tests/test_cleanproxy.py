@@ -58,3 +58,12 @@ def test_late_system_message_moves_to_top():
     clean(body, counts)
     assert [m["role"] for m in body["messages"]] == ["user"]
     assert body["system"][-1]["text"].startswith("# Environment") and counts["system_moved"] == 1
+
+
+def test_tool_name_case_is_fixed_in_replies():
+    from inferoid.cleanproxy import fix_tool_names
+    counts = {}
+    chunk = b'event: content_block_start\ndata: {"type":"content_block_start","content_block":{"type":"tool_use","id":"t1","name":"bash","input":{}}}\n'
+    out = fix_tool_names(chunk, {"bash": "Bash", "read": "Read"}, counts)
+    assert b'"name":"Bash"' in out and counts["tool_name_case_fixed"] == 1
+    assert fix_tool_names(b'"name":"Bash"', {"bash": "Bash"}, counts) == b'"name":"Bash"'

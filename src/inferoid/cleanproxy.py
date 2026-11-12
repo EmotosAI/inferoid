@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import http.server
 import json
+import re
 import threading
 import urllib.error
 import urllib.request
@@ -65,6 +66,22 @@ def clean(body: dict[str, Any], counts: dict[str, int]) -> None:
             message["content"] = [{"type": "text", "text": "(no content)"}]
 
 
+_NAME = re.compile(rb'"name"\s*:\s*"([^"\\]{1,64})"')
+
+
+def fix_tool_names(chunk: bytes, names: dict[str, str], counts: dict[str, int]) -> bytes:
+    """Local models sometimes call `bash` for `Bash`; Claude Code then answers "No such tool available" (Nemotron
+    REAP: 21 of 72 calls in one djmix run). Fix names that differ only in letter case from a tool in the request."""
+    def swap(match: re.Match) -> bytes:
+        name = match.group(1).decode("utf-8", "replace")
+        right = names.get(name.lower())
+        if right and right != name:
+            counts["tool_name_case_fixed"] = counts.get("tool_name_case_fixed", 0) + 1
+            return match.group(0).replace(match.group(1), right.encode())
+        return match.group(0)
+    return _NAME.sub(swap, chunk)
+
+
 class CleanProxy:
     """Start with .start(); point ANTHROPIC_BASE_URL at .url; .counts holds what was changed."""
 
@@ -80,11 +97,14 @@ class CleanProxy:
             def _forward(self, method: str) -> None:
                 length = int(self.headers.get("Content-Length") or 0)
                 body = self.rfile.read(length) if length else None
+                names: dict[str, str] = {}
                 if body and method == "POST" and self.path.startswith("/v1/messages"):
                     try:
                         data = json.loads(body)
                         with proxy.lock:
                             clean(data, proxy.counts)
+                        names = {t["name"].lower(): t["name"] for t in data.get("tools") or []
+                                 if isinstance(t, dict) and isinstance(t.get("name"), str)}
                         body = json.dumps(data).encode()
                     except ValueError:
                         pass
@@ -113,6 +133,9 @@ class CleanProxy:
                     chunk = response.read1(65536) if hasattr(response, "read1") else response.read(65536)
                     if not chunk:
                         break
+                    if names:
+                        with proxy.lock:
+                            chunk = fix_tool_names(chunk, names, proxy.counts)
                     try:
                         self.wfile.write(chunk)
                         self.wfile.flush()
