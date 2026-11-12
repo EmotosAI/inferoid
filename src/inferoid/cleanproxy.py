@@ -1,4 +1,4 @@
-"""Clean mode: a small local proxy between Claude Code and Ollama that removes what confuses local models.
+"""Clean mode: a local proxy between Claude Code and Ollama that removes what confuses local models.
 
 Measured on a 24 GB M4 (djmix bench, 2026-11-12; spec from the bench's PROXY-SPEC.md):
 - thinking -> {"type": "disabled"}. Claude Code sends adaptive thinking (or no field), and gemma4 then never closes its
@@ -15,9 +15,10 @@ import http.server
 import json
 import re
 import threading
+import uuid
 import urllib.error
 import urllib.request
-from typing import Any
+from typing import Any, Iterator
 
 DROP_MARKERS = ("Codebase and user instructions are shown below", "Attribution for git commits")
 
@@ -82,11 +83,236 @@ def fix_tool_names(chunk: bytes, names: dict[str, str], counts: dict[str, int]) 
     return _NAME.sub(swap, chunk)
 
 
+def _text(value: Any) -> str:
+    """Flatten Anthropic text content, ignoring images and other visual blocks."""
+    if isinstance(value, str):
+        return value
+    if not isinstance(value, list):
+        return ""
+    return "".join(str(block.get("text", "")) for block in value
+                   if isinstance(block, dict) and block.get("type") == "text")
+
+
+def _system(value: Any) -> str:
+    return _text(value)
+
+
+def _tool_choice(value: Any) -> Any:
+    if value == "auto":
+        return "auto"
+    if value == "any":
+        return "required"
+    if isinstance(value, dict) and value.get("type") == "tool" and isinstance(value.get("name"), str):
+        return {"type": "function", "function": {"name": value["name"]}}
+    return value
+
+
+def translate_request(body: dict[str, Any], model: str) -> dict[str, Any]:
+    """Translate a cleaned Anthropic Messages request to OpenAI Chat Completions."""
+    messages: list[dict[str, Any]] = []
+    system = _system(body.get("system"))
+    if system:
+        messages.append({"role": "system", "content": system})
+    for message in body.get("messages") or []:
+        if not isinstance(message, dict):
+            continue
+        role = message.get("role")
+        content = message.get("content")
+        if isinstance(content, str):
+            messages.append({"role": role, "content": content})
+            continue
+        if not isinstance(content, list):
+            messages.append({"role": role, "content": _text(content)})
+            continue
+        text_parts: list[str] = []
+        tool_calls: list[dict[str, Any]] = []
+        tool_results: list[dict[str, Any]] = []
+        for block in content:
+            if not isinstance(block, dict):
+                continue
+            block_type = block.get("type")
+            if block_type == "text":
+                text_parts.append(str(block.get("text", "")))
+            elif role == "assistant" and block_type == "tool_use":
+                tool_calls.append({
+                    "id": str(block.get("id", "")),
+                    "type": "function",
+                    "function": {"name": str(block.get("name", "")),
+                                  "arguments": json.dumps(block.get("input") or {}, separators=(",", ":"))},
+                })
+            elif role == "user" and block_type == "tool_result":
+                result = _text(block.get("content"))
+                if block.get("is_error"):
+                    result = "Error: " + result
+                tool_results.append({"role": "tool", "tool_call_id": str(block.get("tool_use_id", "")),
+                                     "content": result})
+        if text_parts or tool_calls:
+            item: dict[str, Any] = {"role": role, "content": "".join(text_parts)}
+            if not text_parts and tool_calls:
+                item["content"] = None
+            if tool_calls:
+                item["tool_calls"] = tool_calls
+            messages.append(item)
+        messages.extend(tool_results)
+
+    request: dict[str, Any] = {"model": model, "messages": messages,
+                               "stream": bool(body.get("stream", False))}
+    for source, target in (("max_tokens", "max_tokens"), ("temperature", "temperature"), ("top_p", "top_p"),
+                           ("stop_sequences", "stop")):
+        if source in body:
+            request[target] = body[source]
+    if body.get("tools"):
+        request["tools"] = [{"type": "function", "function": {
+            "name": tool.get("name", ""), "description": tool.get("description", ""),
+            "parameters": tool.get("input_schema") or {},
+        }} for tool in body["tools"] if isinstance(tool, dict)]
+    if "tool_choice" in body:
+        request["tool_choice"] = _tool_choice(body["tool_choice"])
+    if request["stream"]:
+        request["stream_options"] = {"include_usage": True}
+    return request
+
+
+def _stop_reason(value: Any) -> str:
+    return {"stop": "end_turn", "length": "max_tokens", "tool_calls": "tool_use",
+            "function_call": "tool_use"}.get(str(value), "end_turn")
+
+
+def translate_response(value: dict[str, Any], model: str) -> dict[str, Any]:
+    """Translate a non-streaming OpenAI response to an Anthropic message."""
+    choice = (value.get("choices") or [{}])[0]
+    message = choice.get("message") or {}
+    content: list[dict[str, Any]] = []
+    text = _text(message.get("content"))
+    if text:
+        content.append({"type": "text", "text": text})
+    for call in message.get("tool_calls") or []:
+        function = call.get("function") or {}
+        try:
+            arguments = json.loads(function.get("arguments") or "{}")
+        except (TypeError, ValueError):
+            arguments = {}
+        content.append({"type": "tool_use", "id": call.get("id") or f"toolu_{uuid.uuid4().hex[:20]}",
+                        "name": function.get("name", ""), "input": arguments})
+    usage = value.get("usage") or {}
+    return {"id": value.get("id") or f"msg_{uuid.uuid4().hex}", "type": "message", "role": "assistant",
+            "model": model, "content": content, "stop_reason": _stop_reason(choice.get("finish_reason")),
+            "stop_sequence": None,
+            "usage": {"input_tokens": int(usage.get("prompt_tokens") or 0),
+                      "output_tokens": int(usage.get("completion_tokens") or 0)}}
+
+
+def _event(event: str, payload: dict[str, Any]) -> bytes:
+    return f"event: {event}\ndata: {json.dumps(payload, separators=(',', ':'))}\n\n".encode()
+
+
+def translate_stream(response: Any, model: str) -> Iterator[bytes]:
+    """Yield Anthropic SSE events for an OpenAI streaming response."""
+    message_id = f"msg_{uuid.uuid4().hex}"
+    started = False
+    text_started = False
+    text_index: int | None = None
+    tool_indices: dict[int, int] = {}
+    tool_started: dict[int, bool] = {}
+    next_index = 0
+    finish = "stop"
+    usage: dict[str, Any] = {}
+
+    def start_message(chunk: dict[str, Any]) -> bytes:
+        nonlocal started, message_id
+        if chunk.get("id"):
+            message_id = str(chunk["id"])
+        started = True
+        return _event("message_start", {"type": "message_start", "message": {
+            "id": message_id, "type": "message", "role": "assistant", "model": model, "content": [],
+            "stop_reason": None, "stop_sequence": None,
+            "usage": {"input_tokens": int((chunk.get("usage") or {}).get("prompt_tokens") or 0),
+                      "output_tokens": 0}}})
+
+    def start_text() -> Iterator[bytes]:
+        nonlocal text_started, text_index, next_index
+        if not text_started:
+            text_index, text_started = next_index, True
+            next_index += 1
+            yield _event("content_block_start", {"type": "content_block_start", "index": text_index,
+                                                  "content_block": {"type": "text", "text": ""}})
+
+    for raw in response:
+        line = raw.decode("utf-8", "replace") if isinstance(raw, bytes) else raw
+        if not line.startswith("data:"):
+            continue
+        data = line[5:].strip()
+        if data == "[DONE]":
+            break
+        try:
+            chunk = json.loads(data)
+        except ValueError:
+            continue
+        if not started:
+            yield start_message(chunk)
+        if chunk.get("usage"):
+            usage = chunk["usage"]
+        choices = chunk.get("choices") or []
+        if not choices:
+            continue
+        choice = choices[0] or {}
+        delta = choice.get("delta") or {}
+        if choice.get("finish_reason"):
+            finish = choice["finish_reason"]
+        content = delta.get("content")
+        if content:
+            yield from start_text()
+            yield _event("content_block_delta", {"type": "content_block_delta", "index": text_index,
+                                                  "delta": {"type": "text_delta", "text": content}})
+        for call in delta.get("tool_calls") or []:
+            source_index = int(call.get("index", 0))
+            if source_index not in tool_indices:
+                tool_indices[source_index] = next_index
+                next_index += 1
+            index = tool_indices[source_index]
+            if text_started:
+                yield _event("content_block_stop", {"type": "content_block_stop", "index": text_index})
+                text_started = False
+            function = call.get("function") or {}
+            if not tool_started.get(source_index):
+                tool_started[source_index] = True
+                yield _event("content_block_start", {"type": "content_block_start", "index": index,
+                                                      "content_block": {"type": "tool_use",
+                                                                        "id": call.get("id") or f"toolu_{uuid.uuid4().hex[:20]}",
+                                                                        "name": function.get("name", ""), "input": {}}})
+            arguments = function.get("arguments") or ""
+            if arguments:
+                yield _event("content_block_delta", {"type": "content_block_delta", "index": index,
+                                                      "delta": {"type": "input_json_delta", "partial_json": arguments}})
+    if not started:
+        yield _event("message_start", {"type": "message_start", "message": {
+            "id": message_id, "type": "message", "role": "assistant", "model": model, "content": [],
+            "stop_reason": None, "stop_sequence": None, "usage": {"input_tokens": 0, "output_tokens": 0}}})
+    if text_started:
+        yield _event("content_block_stop", {"type": "content_block_stop", "index": text_index})
+    for index in sorted(tool_indices.values()):
+        source = next(source for source, target in tool_indices.items() if target == index)
+        if tool_started.get(source):
+            yield _event("content_block_stop", {"type": "content_block_stop", "index": index})
+    output_tokens = int(usage.get("completion_tokens") or 0)
+    final_usage = {"output_tokens": output_tokens}
+    if usage.get("prompt_tokens") is not None:
+        final_usage["input_tokens"] = int(usage["prompt_tokens"] or 0)
+    yield _event("message_delta", {"type": "message_delta", "delta": {"stop_reason": _stop_reason(finish),
+                                                                           "stop_sequence": None},
+                                    "usage": final_usage})
+    yield _event("message_stop", {"type": "message_stop"})
+
+
 class CleanProxy:
     """Start with .start(); point ANTHROPIC_BASE_URL at .url; .counts holds what was changed."""
 
-    def __init__(self, upstream: str):
+    def __init__(self, upstream: str, mode: str = "anthropic", model: str = ""):
         self.upstream = upstream.rstrip("/")
+        if mode not in {"anthropic", "openai"}:
+            raise ValueError("proxy mode must be 'anthropic' or 'openai'")
+        self.mode = mode
+        self.model = model
         self.counts: dict[str, int] = {}
         self.lock = threading.Lock()
         proxy = self
@@ -98,6 +324,8 @@ class CleanProxy:
                 length = int(self.headers.get("Content-Length") or 0)
                 body = self.rfile.read(length) if length else None
                 names: dict[str, str] = {}
+                translated = False
+                streaming = False
                 if body and method == "POST" and self.path.startswith("/v1/messages"):
                     try:
                         data = json.loads(body)
@@ -105,23 +333,89 @@ class CleanProxy:
                             clean(data, proxy.counts)
                         names = {t["name"].lower(): t["name"] for t in data.get("tools") or []
                                  if isinstance(t, dict) and isinstance(t.get("name"), str)}
-                        body = json.dumps(data).encode()
+                        if proxy.mode == "openai":
+                            body = json.dumps(translate_request(data, proxy.model)).encode()
+                            translated = True
+                            streaming = bool(data.get("stream"))
+                        else:
+                            body = json.dumps(data).encode()
                     except ValueError:
                         pass
                 headers = {k: v for k, v in self.headers.items() if k.lower() not in ("host", "content-length", "connection")}
-                request = urllib.request.Request(proxy.upstream + self.path, body, method=method, headers=headers)
+                target = "/v1/chat/completions" if translated else self.path
+                request = urllib.request.Request(proxy.upstream + target, body, method=method, headers=headers)
+                upstream_error = False
                 try:
                     response = urllib.request.urlopen(request, timeout=3600)
                 except urllib.error.HTTPError as exc:
                     response = exc
+                    upstream_error = True
                 except OSError as exc:
-                    message = json.dumps({"error": f"Ollama is not reachable: {exc}"}).encode()
+                    payload = {"type": "error", "error": {"type": "api_error", "message": str(exc)}} \
+                        if proxy.mode == "openai" else {"error": f"Ollama is not reachable: {exc}"}
+                    message = json.dumps(payload).encode()
                     self.send_response(502)
                     self.send_header("Content-Type", "application/json")
                     self.send_header("Content-Length", str(len(message)))
                     self.send_header("Connection", "close")
                     self.end_headers()
                     self.wfile.write(message)
+                    return
+                if translated and upstream_error:
+                    raw = response.read()
+                    try:
+                        source = json.loads(raw)
+                    except (TypeError, ValueError):
+                        source = {}
+                    error = source.get("error") if isinstance(source, dict) else None
+                    if isinstance(error, dict):
+                        error_type = str(error.get("type") or "api_error")
+                        message = str(error.get("message") or error)
+                    else:
+                        error_type, message = "api_error", raw.decode("utf-8", "replace") or str(response)
+                    payload = json.dumps({"type": "error", "error": {"type": error_type, "message": message}}).encode()
+                    self.send_response(getattr(response, "status", None) or response.code)
+                    self.send_header("Content-Type", "application/json")
+                    self.send_header("Content-Length", str(len(payload)))
+                    self.send_header("Connection", "close")
+                    self.end_headers()
+                    self.wfile.write(payload)
+                    self.close_connection = True
+                    return
+                if translated and (streaming or str(response.headers.get("Content-Type", "")).split(";", 1)[0].lower() == "text/event-stream"):
+                    self.send_response(getattr(response, "status", None) or response.code)
+                    self.send_header("Content-Type", "text/event-stream")
+                    self.send_header("Cache-Control", "no-cache")
+                    self.send_header("Connection", "close")
+                    self.end_headers()
+                    for chunk in translate_stream(response, proxy.model):
+                        if names:
+                            with proxy.lock:
+                                chunk = fix_tool_names(chunk, names, proxy.counts)
+                        try:
+                            self.wfile.write(chunk)
+                            self.wfile.flush()
+                        except (BrokenPipeError, ConnectionResetError):
+                            break
+                    self.close_connection = True
+                    return
+                if translated:
+                    raw = response.read()
+                    try:
+                        output = translate_response(json.loads(raw), proxy.model)
+                        raw = json.dumps(output).encode()
+                    except (TypeError, ValueError):
+                        pass
+                    if names:
+                        with proxy.lock:
+                            raw = fix_tool_names(raw, names, proxy.counts)
+                    self.send_response(getattr(response, "status", None) or response.code)
+                    self.send_header("Content-Type", "application/json")
+                    self.send_header("Content-Length", str(len(raw)))
+                    self.send_header("Connection", "close")
+                    self.end_headers()
+                    self.wfile.write(raw)
+                    self.close_connection = True
                     return
                 self.send_response(getattr(response, "status", None) or response.code)
                 for key, value in response.headers.items():
