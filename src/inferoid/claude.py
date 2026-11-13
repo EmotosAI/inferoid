@@ -315,7 +315,7 @@ def preflight(model: str, model_gb: float, memory: dict[str, float]) -> list[str
     return notes
 
 
-MODEL_GB = {"nemotron-3.5-lightning:30b-a3b-mlx": 19.0, "nemotron-3.5-lightning:30b-a3b": 19.0, "gpt-oss:20b": 14.0, "nemotron-3.5-bolt:e4b": 7.5}
+MODEL_GB = {"hf.co/sleepyeldrazi/Ornith-1.5-REAP-20B-A3B-GGUF:UD-IQ4_NL": 10.4, "hf.co/crucible-labs/Qwen3.6-35B-A3B-REAP-48-v2-GGUF": 9.4, "hf.co/sleepyeldrazi/Nemotron-3.5-Lightning-30B-A3B-REAP-20B-LoRA-IQ4NL:IQ4_NL": 11.7, "nemotron-3.5-lightning:30b-a3b-mlx": 19.0, "nemotron-3.5-lightning:30b-a3b": 19.0, "gpt-oss:20b": 14.0, "nemotron-3.5-bolt:e4b": 7.5}
 
 
 def gpu_limit_needed(model: str, model_gb: float, memory: dict[str, float]) -> int:
@@ -730,6 +730,9 @@ def _launchctl(name: str) -> str:
 
 
 MODEL_LABELS = {
+    "hf.co/sleepyeldrazi/Ornith-1.5-REAP-20B-A3B-GGUF:UD-IQ4_NL": "Ornith 1.5 REAP-20B-A3B",
+    "hf.co/crucible-labs/Qwen3.6-35B-A3B-REAP-48-v2-GGUF": "Qwen3.6 35B-A3B REAP-48",
+    "hf.co/sleepyeldrazi/Nemotron-3.5-Lightning-30B-A3B-REAP-20B-LoRA-IQ4NL:IQ4_NL": "Nemotron 3.5 Lightning 30B-A3B REAP-20B",
     "nemotron-3.5-lightning:30b-a3b-mlx": "Nemotron 3.5 Lightning 30B (MLX)",
     "nemotron-3.5-lightning:30b-a3b": "Nemotron 3.5 Lightning 30B",
     "nemotron-3.5-bolt:e4b": "Nemotron 3.5 Bolt",

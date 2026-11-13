@@ -17,7 +17,7 @@ inferoid setup
 
 `inferoid setup` walks you through it:
 
-1. Looks at your Mac and recommends a model that fits the GPU memory macOS allows by default, so your Mac stays responsive. From about 32 GB that is Nemotron 3.5 Lightning 30B (19 GB, Ollama's MLX build `nemotron-3.5-lightning:30b-a3b-mlx`), the fastest in our [handover benchmark](docs/handover-benchmark.md). On 16 to 24 GB it is Nemotron 3.5 Bolt until a 12 GB build of Lightning is ready.
+1. Looks at your Mac, then asks what the local model is for: **coding** (edits, tests and tool calls in your repos) or **general** (chat, writing). It shows up to three models that fit your memory, each with its measured result, plus a 4th option, **Learn which one to pick**, that links to the benchmark ([coding on a 24 GB Mac](https://inferoid.com/lab/free-agents)) so you can compare and come back. For coding on 24 GB and up: Ornith 1.5 REAP-20B-A3B and Qwen3.6 35B-A3B REAP-48 (both passed 2/2 on a real repository task) and Nemotron 3.5 Lightning REAP-20B (1/2). Each coding model gets the context it was measured with (64K or 96K).
 2. Downloads it with Ollama and sets safe Ollama limits: a context cap for your memory (32K on 24 GB, 64K on 48 GB, 128K above), one model loaded at a time, and unloading after 10 idle minutes. inferoid never raises the macOS GPU memory limit by itself; `claude-local --allow-gpu-limit` offers it only when macOS would still keep at least 4 GB.
 3. Asks which coding agent you use. Claude Code for now; Codex, Cursor, Hermes and OpenClaw are next.
 4. Asks for your handoff settings: keep a `HANDOFF.md` plan (on), the usage level at which Claude must update it first (90%), and whether this applies to all projects or one folder.
