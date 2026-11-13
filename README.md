@@ -1,12 +1,16 @@
 # inferoid
 
-Keep coding when Claude hits its limit. `inferoid` puts a free local model on your Mac, next to Claude Code, and makes the handover clean: Claude keeps a short `HANDOFF.md` plan, and when your 5-hour or weekly limit runs out, the local model picks up from that plan.
+Keep coding when Claude hits its limit, and hand chores to a free local model. `inferoid` puts a local model on your computer, next to Claude Code (or Codex), and makes the handover clean: Claude keeps a short `HANDOFF.md` plan, and when your 5-hour or weekly limit runs out, the local model picks up from that plan.
 
-Everything runs on your machine. inferoid never reads, stores or forwards your Claude login, has no telemetry, and only talks to Ollama on `localhost`.
+Everything runs on your machine. inferoid never reads, stores or forwards your Claude login, has no telemetry, and only talks to the local model on `localhost`.
 
-## Quick start
+It works on **macOS** (Apple silicon), **Linux** (NVIDIA GPU or CPU only) and **Windows through WSL2**. Pick your section below; the commands after install are the same everywhere.
 
-You need [Ollama](https://ollama.com/download), [Claude Code](https://code.claude.com) 2.1.242 or newer, and Python 3.11+ with [uv](https://docs.astral.sh/uv/).
+## Install
+
+### macOS (Apple silicon)
+
+You need [Ollama](https://ollama.com/download) (the app), [Claude Code](https://code.claude.com) 2.1.242 or newer, and Python 3.11+ with [uv](https://docs.astral.sh/uv/).
 
 ```sh
 git clone https://github.com/EmotosAI/inferoid.git
@@ -15,16 +19,70 @@ uv tool install .
 inferoid setup
 ```
 
-`inferoid setup` walks you through it:
+- **Memory:** a Mac shares memory between CPU and GPU, and macOS lets models use about 67% of it (75% above 36 GB). Setup only offers models that fit that share.
+- **Ollama limits** are set for you through `launchctl` (setup asks first, then restarts the Ollama app).
+- **Sandbox:** the macOS kernel sandbox (Seatbelt), built in.
+- inferoid never raises the macOS GPU memory limit by itself; `claude-local --allow-gpu-limit` offers it only when macOS would still keep at least 4 GB.
 
-1. Looks at your Mac, then asks what the local model is for: **coding** (edits, tests and tool calls in your repos) or **general** (chat, writing). It shows up to three models that fit your memory, each with its measured result, plus a 4th option, **Learn which one to pick**, that links to the benchmark ([coding on a 24 GB Mac](https://inferoid.com/lab/free-agents)) so you can compare and come back. For coding on 24 GB and up: Ornith 1.5 REAP-20B-A3B and Qwen3.6 35B-A3B REAP-48 (both passed 2/2 on a real repository task) and Nemotron 3.5 Lightning REAP-20B (1/2). Each coding model gets the context it was measured with (64K or 96K).
-2. Downloads it with Ollama and sets safe Ollama limits: a context cap for your memory (32K on 24 GB, 64K on 48 GB, 128K above), one model loaded at a time, and unloading after 10 idle minutes. inferoid never raises the macOS GPU memory limit by itself; `claude-local --allow-gpu-limit` offers it only when macOS would still keep at least 4 GB.
-3. Asks which coding agent you use. Claude Code for now; Codex, Cursor, Hermes and OpenClaw are next.
+### Linux (NVIDIA GPU or CPU only)
+
+You need Ollama, Claude Code 2.1.242 or newer, Python 3.11+ with uv, and bubblewrap for the sandbox.
+
+```sh
+curl -fsSL https://ollama.com/install.sh | sh
+sudo apt install bubblewrap          # Fedora: sudo dnf install bubblewrap
+git clone https://github.com/EmotosAI/inferoid.git
+cd inferoid
+uv tool install .
+inferoid setup
+```
+
+- **Memory:** with an NVIDIA GPU, setup reads its memory with `nvidia-smi` and offers models that fit the card (its memory minus 1 GB). Without one, models run on the CPU from system RAM: slower, but they work (see [Intel CPU results](https://inferoid.com/lab/intel-cpu)).
+- **Ollama limits:** setup prints the three settings to use (`OLLAMA_CONTEXT_LENGTH`, `OLLAMA_MAX_LOADED_MODELS`, `OLLAMA_KEEP_ALIVE`). With the systemd service, add them with `sudo systemctl edit ollama` and restart it.
+- **Sandbox:** bubblewrap. If it is missing, setup says so and local workers run unsandboxed; install it and run `inferoid setup` again.
+
+### Windows (WSL2)
+
+inferoid runs inside WSL2, Microsoft's built-in Linux. Most developers who use Claude Code or Codex on Windows already have it; if not, run `wsl --install` in PowerShell and restart.
+
+Then, inside your WSL2 terminal (Ubuntu), follow the Linux steps above:
+
+```sh
+curl -fsSL https://ollama.com/install.sh | sh     # Ollama inside WSL2 uses your NVIDIA GPU through WSL's CUDA support
+sudo apt install bubblewrap
+git clone https://github.com/EmotosAI/inferoid.git
+cd inferoid
+uv tool install .
+inferoid setup
+```
+
+- **Use Claude Code inside WSL2** too, so the agent, inferoid and your repositories are on the same side.
+- **Already run the Ollama app on Windows?** Either install Ollama inside WSL2 as above, or turn on mirrored networking (`networkingMode=mirrored` in `%UserProfile%\.wslconfig`) so WSL2 reaches the Windows app on `localhost`.
+- **GPU check:** `nvidia-smi` inside WSL2 should list your card. If it does, setup sizes models for it.
+- **Sandbox:** bubblewrap, same as Linux.
+
+## What `inferoid setup` does
+
+1. Looks at your machine (memory, and your NVIDIA GPU if you have one), then asks what the local model is for: **coding** (edits, tests and tool calls in your repos) or **general** (chat, writing). It shows up to three models that fit, each with its measured result, plus a 4th option, **Learn which one to pick**, that links to the benchmark ([coding on a 24 GB Mac](https://inferoid.com/lab/free-agents)) so you can compare and come back. For coding with 24 GB and up: Ornith 1.5 REAP-20B-A3B and Qwen3.6 35B-A3B REAP-48 (both passed 2/2 on a real repository task) and Nemotron 3.5 Lightning REAP-20B (1/2). Each coding model gets the context it was measured with (64K or 96K).
+2. Downloads it with Ollama and sets safe limits: a context cap for your memory (32K up to 24 GB, 64K up to 48 GB, 128K above, or the model's measured context), one model loaded at a time, and unloading after 10 idle minutes.
+3. Asks which coding agent you use (Claude Code, Codex, Cursor) and registers the `local_agent` tool so it can hand work to the local model.
 4. Asks for your handoff settings: keep a `HANDOFF.md` plan (on), the usage level at which Claude must update it first (90%), and whether this applies to all projects or one folder.
-5. Offers to build your usage report: where your Claude limit goes, and what the local model saved.
-6. Installs the settings and a `claude-local` command, then prints what you chose.
+5. **Safety check:** runs eight escape attempts inside the sandbox on your machine (write outside the task folder, delete a file, read an SSH key, reach the internet, ...). Every one must be blocked, and work inside the folder and calls to the local model must still succeed.
+6. Offers to build your usage report: where your Claude limit goes, and what the local model saved.
+7. Installs the settings and a `claude-local` command, then prints what you chose.
 
 To update later: `git pull && uv tool install --force --reinstall .` in the cloned folder. `claude-local` prints the installed version when it starts.
+
+## What the sandbox blocks
+
+Every command the local model runs (including `python -c` and shell tricks) runs inside the sandbox:
+
+| | macOS | Linux and WSL2 |
+|---|---|---|
+| Engine | Seatbelt (`sandbox-exec`) | bubblewrap (`bwrap`) |
+| Writes | Only the task folder, temp folders and Claude Code's own settings | Same |
+| Secrets | No reads of `~/.ssh`, `~/.aws`, `~/.config`, Keychains, browser profiles, any `.env` file | Same; secret folders appear empty, `.env` files appear empty |
+| Network | Only `localhost` (the local model) | No network at all; the local model's port is relayed in through a Unix socket |
 
 ## Daily use
 
@@ -35,7 +93,7 @@ inferoid claude status    # 5-hour and weekly usage, reset times, open steps in 
 claude                    # limit reset: back to Claude, which reads HANDOFF.md too
 ```
 
-In a `claude-local` session, Claude Code shows "claude.ai connectors are disabled": expected, because that session does not use your claude.ai login. `/model` lists the local model as "(local, free)". It starts lean: no MCP servers, skills or hooks, and six core tools (Bash, Read, Edit, Write, Glob, Grep), which cuts what the model must read before your first message from about 43K tokens to about 5K. `claude-local --full` loads everything. `claude-local --resume` continues the last full conversation instead of starting from the plan; it works, but is several times slower on a 24 GB Mac because the whole conversation has to be read again.
+In a `claude-local` session, Claude Code shows "claude.ai connectors are disabled": expected, because that session does not use your claude.ai login. `/model` lists the local model as "(local, free)". It starts lean: no MCP servers, skills or hooks, and six core tools (Bash, Read, Edit, Write, Glob, Grep), which cuts what the model must read before your first message from about 43K tokens to about 5K. `claude-local --full` loads everything. `claude-local --resume` continues the last full conversation instead of starting from the plan; it works, but is several times slower on a 24 GB machine because the whole conversation has to be read again.
 
 ## How it works
 

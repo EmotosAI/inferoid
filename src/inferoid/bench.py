@@ -395,10 +395,11 @@ def run_claude(args: list[str], env: dict[str, str], worktree: Path, model: str,
     from . import sandbox as sandbox_mod
     if os.environ.get("INFEROID_SANDBOX", "1") != "0":
         if sandbox_mod.available():
-            args = sandbox_mod.wrap(args, worktree)
-            state["sandbox"] = "seatbelt"
+            args = sandbox_mod.wrap(args, worktree, env=env)
+            state["sandbox"] = sandbox_mod.kind()
         else:
-            state["errors"].append("no sandbox on this system (macOS only for now); the worker ran unsandboxed")
+            state["errors"].append("no sandbox on this system (macOS: sandbox-exec; Linux/WSL2: install bubblewrap); "
+                                   "the worker ran unsandboxed")
     process = subprocess.Popen(args, cwd=worktree, env=env, stdin=subprocess.DEVNULL,
                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
                                bufsize=1, start_new_session=True)

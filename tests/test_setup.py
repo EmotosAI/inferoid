@@ -65,7 +65,7 @@ def test_setup_reports_sandbox_state(tmp_path, monkeypatch):
                    claude_version=lambda: "2.1.322 (Claude Code)", bin_dir=tmp_path / "bin",
                    gpu_raiser=lambda mb, ask: ask("q"), reporter=lambda: "", sandbox_checker=lambda: "verified")
     text = "\n".join(lines)
-    assert rc == 0 and "Sandbox         verified on this Mac" in text and "local_agent" in text
+    assert rc == 0 and "Sandbox         verified on this machine" in text and "local_agent" in text
 
 
 def test_setup_learn_option_links_benchmark_then_picks(tmp_path, monkeypatch):
@@ -87,3 +87,16 @@ def test_setup_coding_on_16gb_falls_back(tmp_path, monkeypatch):
     text = "\n".join(lines)
     assert rc == 0 and "need more memory than this machine has" in text
     assert json.loads(setup.config_path().read_text())["model"] == "nemotron-3.5-bolt:e4b"
+
+
+def test_nvidia_gpu_memory_decides_fit(tmp_path, monkeypatch):
+    _env(tmp_path, monkeypatch, [], ram=64.0)
+    monkeypatch.setattr(setup, "machine_memory", lambda: {"ram_gb": 64.0, "wired_limit_gb": 0.0, "vram_gb": 24.0, "gpu": "NVIDIA A10G"})
+    assert claude.default_budget({"ram_gb": 64.0, "vram_gb": 24.0}) == 23.0
+    assert claude.context_for({"ram_gb": 64.0, "vram_gb": 24.0}) == 32768
+    lines = []
+    rc = setup.run(tmp_path, answers={"report": "n"}, out=lines.append, pull=lambda m: 0,
+                   claude_version=lambda: "2.1.322", bin_dir=tmp_path / "bin")
+    text = "\n".join(lines)
+    assert rc == 0 and "GPU NVIDIA A10G with 24 GB" in text
+    assert json.loads(setup.config_path().read_text())["model"] == setup.WORKLOADS["coding"]["models"][0][0]
