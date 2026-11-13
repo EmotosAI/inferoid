@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any
 from collections.abc import Callable
 
-from . import claude
+from . import claude, sandbox
 from .night import machine_memory
 
 MIN_CLAUDE = (2, 1, 242)  # --settings modelPicker
@@ -210,7 +210,7 @@ def pick_for_workload(p: "Prompter", out: Callable[[str], None], mem: dict[str, 
         out(f"  {i}. {WORKLOADS[key]['label']}")
     raw = p.ask("workload", "Pick a number", "1")
     work = WORKLOADS[keys[int(raw) - 1] if raw.isdigit() and 0 < int(raw) <= len(keys) else keys[0]]
-    ram = mem.get("ram_gb", 0.0)
+    ram = mem.get("vram_gb") or mem.get("ram_gb", 0.0)
     fits = [x for x in work["models"] if ram >= x[1] and claude.fits_safely(x[0], MODEL_GB.get(x[0], 0.0), mem)][:3]
     if not fits:
         out(f"The models we measured for this need more memory than this machine has; offering the best fit instead.")
@@ -243,7 +243,11 @@ def run(project: Path, answers: dict[str, str] | None = None, out: Callable[[str
     budget = claude.default_budget(mem)
     cap = claude.context_for(mem)
     model, gb = claude.pick_model(mem)
-    out(f"This machine: {chip}, {mem.get('ram_gb', 0):.0f} GB memory ({budget:.0f} GB usable by the GPU by default).")
+    if mem.get("vram_gb"):
+        out(f"This machine: {chip}, {mem.get('ram_gb', 0):.0f} GB memory, GPU {mem.get('gpu', 'NVIDIA')} with {mem['vram_gb']:.0f} GB "
+            f"({budget:.0f} GB usable for models).")
+    else:
+        out(f"This machine: {chip}, {mem.get('ram_gb', 0):.0f} GB memory ({budget:.0f} GB usable by the GPU by default).")
     out(f"Safe setup for it: models that fit that budget, and a {cap:,}-token context cap so the Mac never runs out of memory.")
     model, gb, ctx = pick_for_workload(p, out, mem, (model, gb))
     if ctx > cap:
@@ -256,7 +260,9 @@ def run(project: Path, answers: dict[str, str] | None = None, out: Callable[[str
         return 1
     have = _ollama_models()
     if have is None:
-        out("\nOllama is installed but not running. Open the Ollama app (or run: ollama serve), then run inferoid setup again.")
+        hint = (" In WSL2, run Ollama inside WSL (curl -fsSL https://ollama.com/install.sh | sh), or turn on mirrored "
+                "networking so the Windows Ollama app answers on localhost." if sandbox.is_wsl() else "")
+        out("\nOllama is installed but not running. Open the Ollama app (or run: ollama serve), then run inferoid setup again." + hint)
         return 1
     if model in have:
         out(f"{model} is already downloaded.")
@@ -347,7 +353,7 @@ def run(project: Path, answers: dict[str, str] | None = None, out: Callable[[str
         except Exception as exc:  # the report must never break setup
             out(f"The report could not be built ({exc}). Try later: inferoid scan && inferoid report")
 
-    # 5b. safety: prove on THIS Mac that local workers are sandboxed (kernel-enforced), before anything runs unattended
+    # 5b. safety: prove on THIS machine that local workers are sandboxed (kernel-enforced), before anything runs unattended
     sandbox_state = (sandbox_checker or check_sandbox)()
     cfg["sandbox"] = sandbox_state
     config_path().write_text(json.dumps(cfg, indent=2) + "\n")
@@ -361,11 +367,11 @@ def run(project: Path, answers: dict[str, str] | None = None, out: Callable[[str
         out(f"  Reminder at     {threshold:.0f}% of the 5-hour or weekly limit")
         out(f"  Applies to      {'all projects (~/.claude)' if global_ else 'this folder (' + str(project) + ')'}")
     out("  At the limit    you switch with: claude-local")
-    out("  Sandbox         " + {"verified": "verified on this Mac: local workers can't write outside their task folder, "
+    out("  Sandbox         " + {"verified": "verified on this machine: local workers can't write outside their task folder, "
                                              "read your keys, or reach the internet",
                              "failed": "CHECK FAILED: do not run local workers unattended (see above)",
-                             "unavailable": "not available on this system (macOS only for now): run local workers "
-                                            "from a separate user account"}[sandbox_state])
+                             "unavailable": "not available: on Linux or WSL2 install bubblewrap (sudo apt install bubblewrap) "
+                                            "and run inferoid setup again"}[sandbox_state])
     out("  Usage report    inferoid scan && inferoid report")
     out("\nHow to use it:")
     out("  claude            work as usual with Opus or Sonnet" + (f"; at {threshold:.0f}% Claude updates HANDOFF.md" if handoff else ""))

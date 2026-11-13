@@ -148,3 +148,13 @@ after = "t0"
     assert state["tasks"]["t1"]["status"] == "review" and state["tasks"]["t2"]["status"] == "review"
     assert "t3" not in state["tasks"]
     assert subprocess.run(["git", "-C", str(repo), "status", "--porcelain"], capture_output=True, text=True, check=True).stdout == ""
+
+
+def test_nvidia_gpu_parses_largest_card(monkeypatch):
+    from inferoid import night
+    monkeypatch.setattr(night.platform, "system", lambda: "Linux")
+    monkeypatch.setattr(night.shutil, "which", lambda name: "/usr/bin/nvidia-smi")
+    class R:
+        stdout = "8192, NVIDIA GeForce RTX 4060\n24576, NVIDIA GeForce RTX 4090\n"
+    monkeypatch.setattr(night.subprocess, "run", lambda *a, **k: R())
+    assert night.nvidia_gpu() == (24.0, "NVIDIA GeForce RTX 4090")

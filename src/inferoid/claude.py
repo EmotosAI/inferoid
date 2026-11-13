@@ -242,8 +242,9 @@ def uninstall(project: Path, global_: bool = False) -> list[str]:
 # ---------------------------------------------------------------- local session
 
 def context_for(memory: dict[str, float]) -> int:
-    """Hard context cap by memory tier, enforced in Ollama and in Claude Code (which compacts before it)."""
-    ram = memory.get("ram_gb", 0.0)
+    """Hard context cap by memory tier, enforced in Ollama and in Claude Code (which compacts before it).
+    With an NVIDIA GPU the tier is its own memory (VRAM), not system RAM."""
+    ram = memory.get("vram_gb") or memory.get("ram_gb", 0.0)
     if ram <= 24:
         return 32768
     if ram <= 48:
@@ -259,7 +260,10 @@ def kv_gb(model: str, tokens: int) -> float:
 
 
 def default_budget(memory: dict[str, float]) -> float:
-    """GPU memory macOS allows by default (ignores a raised iogpu.wired_limit_mb)."""
+    """GPU memory macOS allows by default (ignores a raised iogpu.wired_limit_mb). With an NVIDIA GPU: its memory
+    minus 1 GB for the display and driver."""
+    if memory.get("vram_gb"):
+        return max(0.0, memory["vram_gb"] - 1.0)
     ram = memory.get("ram_gb", 0.0)
     return ram * (0.67 if ram <= 36 else 0.75)
 

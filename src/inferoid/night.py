@@ -63,7 +63,30 @@ def machine_memory() -> dict[str, float]:
                     break
         except OSError:
             pass
-    return {"ram_gb": round(ram, 1), "wired_limit_gb": round(wired, 1)}
+    out = {"ram_gb": round(ram, 1), "wired_limit_gb": round(wired, 1)}
+    vram, gpu = nvidia_gpu()
+    if vram:
+        out["vram_gb"], out["gpu"] = vram, gpu
+    return out
+
+
+def nvidia_gpu() -> tuple[float, str]:
+    """Largest NVIDIA GPU's memory in GB and its name (Linux, WSL2, Windows), or (0, "") without one."""
+    if platform.system() == "Darwin" or not shutil.which("nvidia-smi"):
+        return 0.0, ""
+    try:
+        text = subprocess.run(["nvidia-smi", "--query-gpu=memory.total,name", "--format=csv,noheader,nounits"],
+                              capture_output=True, text=True, timeout=10).stdout
+    except (OSError, subprocess.SubprocessError):
+        return 0.0, ""
+    best = (0.0, "")
+    for line in text.splitlines():
+        mib, _, name = line.partition(",")
+        try:
+            best = max(best, (round(float(mib) / 1024, 1), name.strip()))
+        except ValueError:
+            continue
+    return best
 
 
 def gpu_budget_gb(ram_gb: float, wired_limit_gb: float = 0.0) -> float:
