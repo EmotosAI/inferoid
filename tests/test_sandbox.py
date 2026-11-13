@@ -1,5 +1,5 @@
+
 import pytest
-from pathlib import Path
 
 from inferoid import sandbox
 
@@ -43,7 +43,10 @@ def test_linux_wrap_cuts_network_hides_secrets_and_env_files(tmp_path):
 
 @pytest.mark.skipif(sandbox.kind() != "bubblewrap", reason="needs bubblewrap with user namespaces")
 def test_linux_sandbox_blocks_escapes_and_keeps_localhost(tmp_path):
-    import http.server, socket, subprocess, sys, threading
+    import http.server
+    import subprocess
+    import sys
+    import threading
     wt = tmp_path / "wt"
     wt.mkdir()
     srv = http.server.HTTPServer(("127.0.0.1", 0), http.server.SimpleHTTPRequestHandler)
@@ -58,7 +61,7 @@ def test_linux_sandbox_blocks_escapes_and_keeps_localhost(tmp_path):
             f"print(urllib.request.urlopen('http://127.0.0.1:{port}/', timeout=5).status)\n"
             f"try:\n    urllib.request.urlopen('https://example.com', timeout=5); print('INTERNET')\nexcept Exception: print('internet-blocked')\n")
     args = sandbox.wrap_linux([sys.executable, "-c", code], wt, home=tmp_path / "home", ports=[port])
-    out = subprocess.run(args, capture_output=True, text=True, timeout=60).stdout
+    out = subprocess.run(args, capture_output=True, text=True, timeout=60, check=False).stdout
     srv.shutdown()
     leaked = outside.exists()
     outside.unlink(missing_ok=True)

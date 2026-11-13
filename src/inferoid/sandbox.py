@@ -15,7 +15,6 @@ Other systems: callers print a warning and run unsandboxed only if the user allo
 from __future__ import annotations
 
 import os
-import os
 import platform
 import shutil
 import socket
@@ -40,7 +39,7 @@ def kind() -> str:
         return "seatbelt" if shutil.which("sandbox-exec") else ""
     if platform.system() == "Linux" and shutil.which("bwrap"):
         try:  # user namespaces can be disabled; prove bwrap actually starts
-            ok = subprocess.run(["bwrap", "--ro-bind", "/", "/", "--unshare-net", "true"], capture_output=True, timeout=10).returncode == 0
+            ok = subprocess.run(["bwrap", "--ro-bind", "/", "/", "--unshare-net", "true"], capture_output=True, timeout=10, check=False).returncode == 0
         except (OSError, subprocess.SubprocessError):
             ok = False
         return "bubblewrap" if ok else ""
@@ -198,7 +197,7 @@ def _inside(argv: list[str]) -> int:
         else:
             i += 1
     cmd = argv[i + 1:]
-    subprocess.run(["ip", "link", "set", "lo", "up"], capture_output=True)  # bwrap usually does this already
+    subprocess.run(["ip", "link", "set", "lo", "up"], capture_output=True, check=False)  # bwrap usually does this already
     for port, path in forwards:
         srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -243,7 +242,7 @@ def selftest(workdir: Path) -> int:
     (home / ".zshrc.inferoid-test").write_text("x\n")
     failures = 0
     for name, cmd, should_work in attempts:
-        rc = subprocess.run(wrap(cmd, workdir), capture_output=True, text=True, timeout=30).returncode
+        rc = subprocess.run(wrap(cmd, workdir), capture_output=True, text=True, timeout=30, check=False).returncode
         if name.startswith("delete"):
             ok = (home / ".zshrc.inferoid-test").exists()
             print(f"{'PASS' if ok else 'FAIL'}  {name}: {'blocked' if ok else 'FILE WAS DELETED'}")

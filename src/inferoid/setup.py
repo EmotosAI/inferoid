@@ -201,7 +201,7 @@ def check_sandbox(out: Callable[[str], None] = print) -> str:
     return "verified"
 
 
-def pick_for_workload(p: "Prompter", out: Callable[[str], None], mem: dict[str, float], fallback: tuple[str, float]) -> tuple[str, float, int]:
+def pick_for_workload(p: Prompter, out: Callable[[str], None], mem: dict[str, float], fallback: tuple[str, float]) -> tuple[str, float, int]:
     """Ask what the local model is for, then offer up to three models that fit this machine, measured where we have
     results, plus a 4th option that links to the benchmark so the user can read it and come back."""
     out("\nWhat will the local model mostly do?")
@@ -213,7 +213,7 @@ def pick_for_workload(p: "Prompter", out: Callable[[str], None], mem: dict[str, 
     ram = mem.get("vram_gb") or mem.get("ram_gb", 0.0)
     fits = [x for x in work["models"] if ram >= x[1] and claude.fits_safely(x[0], MODEL_GB.get(x[0], 0.0), mem)][:3]
     if not fits:
-        out(f"The models we measured for this need more memory than this machine has; offering the best fit instead.")
+        out("The models we measured for this need more memory than this machine has; offering the best fit instead.")
         fits = [(fallback[0], 0, "best fit for this memory", 0)]
     out("\nModels for this on your machine:")
     for i, (m, _, why, _ctx) in enumerate(fits, 1):

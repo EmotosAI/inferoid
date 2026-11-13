@@ -76,7 +76,7 @@ def nvidia_gpu() -> tuple[float, str]:
         return 0.0, ""
     try:
         text = subprocess.run(["nvidia-smi", "--query-gpu=memory.total,name", "--format=csv,noheader,nounits"],
-                              capture_output=True, text=True, timeout=10).stdout
+                              capture_output=True, text=True, timeout=10, check=False).stdout
     except (OSError, subprocess.SubprocessError):
         return 0.0, ""
     best = (0.0, "")
