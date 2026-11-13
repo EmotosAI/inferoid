@@ -136,8 +136,9 @@ def memory_pressure() -> str:
 
 
 class Monitor:
-    def __init__(self, model: str):
+    def __init__(self, model: str, ollama: bool = True, estimate: float = 0.0):
         self.model = model
+        self.ollama = ollama
         self.stop = threading.Event()
         self.thread: threading.Thread | None = None
         self.peak_model = 0.0
@@ -152,7 +153,7 @@ class Monitor:
         self.max_gap = 0.0
         self.last_wired = 0.0
         self.samples = 0
-        self.estimate = 0.0  # layout estimate for models Ollama under-reports; set by the caller
+        self.estimate = estimate  # layout estimate, or a known Ollama model size for another engine
 
     def sample(self) -> None:
         now = time.monotonic()
@@ -160,9 +161,9 @@ class Monitor:
         self.last_sample = now
         self.max_gap = max(self.max_gap, gap)
         self.samples += 1
-        reported = loaded_model_memory(self.model)
+        reported = loaded_model_memory(self.model) if self.ollama else self.estimate
         trusted = not self.weights or reported >= self.weights * 0.9
-        if not trusted:
+        if self.ollama and not trusted:
             # Ollama under-reports some models. System-memory deltas include the file cache holding the GGUF, so they
             # are not a model figure either: report the probe's layout estimate instead.
             reported = max(reported, self.estimate)
@@ -214,8 +215,8 @@ def _allowed_tools(patterns: list[str], deny: list[str] | None = None) -> list[s
 
 
 def command_for(worktree: Path, model: str, brief: str, context: int, patterns: list[str],
-                deny: list[str] | None = None) -> tuple[list[str], dict[str, str]]:
-    base, env, mode = claude.local_command(worktree, model, resume=False, full=False, context=context)
+                deny: list[str] | None = None, engine: str = "ollama") -> tuple[list[str], dict[str, str]]:
+    base, env, mode = claude.local_command(worktree, model, resume=False, full=False, context=context, engine=engine)
     if deny and "--tools" in base:
         # The model does not even see denied tools, e.g. no Edit/Write so a task's own safe edit command is the only way.
         i = base.index("--tools") + 1
@@ -379,16 +380,25 @@ STALL_S = 600  # no finished reply for 10 minutes = runaway; MAX_REPLY_TOKENS no
 
 
 def run_claude(args: list[str], env: dict[str, str], worktree: Path, model: str, timeout: int, context: int,
-               transcript: Path | None = None, baseline: float = 0.0, limit: float = 0.0) -> dict[str, Any]:
+               transcript: Path | None = None, baseline: float = 0.0, limit: float = 0.0,
+               engine: str = "ollama", model_memory: float = 0.0) -> dict[str, Any]:
     state: dict[str, Any] = {"first_reply_s": None, "turns": 0, "tool_calls": 0,
                              "input_tokens": 0, "output_tokens": 0, "result_seen": False, "errors": []}
     started = time.monotonic()
-    monitor = Monitor(model)
-    monitor.baseline, monitor.weights = baseline, claude.weights_gb(model)
+    monitor = Monitor(model, ollama=engine == "ollama", estimate=model_memory)
+    monitor.baseline, monitor.weights = baseline, claude.weights_gb(model) if engine == "ollama" else 0.0
     monitor.limit = limit
-    if monitor.weights:
+    if monitor.weights and engine == "ollama":
         monitor.estimate = monitor.weights + claude.kv_estimate_gb(model, context) + claude.RUNTIME_GB
     lines: queue.Queue[str | None] = queue.Queue()
+    # Kernel sandbox for the local worker (on by default): writes only in the worktree, no secrets, no internet.
+    from . import sandbox as sandbox_mod
+    if os.environ.get("INFEROID_SANDBOX", "1") != "0":
+        if sandbox_mod.available():
+            args = sandbox_mod.wrap(args, worktree)
+            state["sandbox"] = "seatbelt"
+        else:
+            state["errors"].append("no sandbox on this system (macOS only for now); the worker ran unsandboxed")
     process = subprocess.Popen(args, cwd=worktree, env=env, stdin=subprocess.DEVNULL,
                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
                                bufsize=1, start_new_session=True)
@@ -516,6 +526,26 @@ def _engine_version() -> str:
         return "unknown"
 
 
+def _openai_engine_version(url: str) -> str:
+    try:
+        with urllib.request.urlopen(url.rstrip("/") + "/v1/models", timeout=2) as response:
+            value = json.loads(response.read())
+        if isinstance(value, dict) and value.get("version"):
+            return str(value["version"])
+        if isinstance(value, dict) and isinstance(value.get("data"), list) and value["data"]:
+            first = value["data"][0]
+            if isinstance(first, dict) and first.get("version"):
+                return str(first["version"])
+    except (OSError, ValueError, TypeError):
+        pass
+    return "unknown"
+
+
+def _openai_model_info(model: str, size_gb: float = 0.0) -> dict[str, Any]:
+    family = model.split(":", 1)[0]
+    return {"name": model, "size_gb": size_gb, "family": family, "quant": "unknown"}
+
+
 def _model_info(model: str) -> dict[str, Any]:
     family = model.split(":", 1)[0]
     quant = "unknown"
@@ -563,27 +593,49 @@ def run(project: Path, brief_file: Path, check: str, pack: str, task: str, kind:
         allow_bash: list[str] | None = None, reference: Path | None = None,
         no_submit: bool = False, force: bool = False, keep: bool = False,
         share: list[str] | None = None, from_commit: bool = False,
-        context: str | None = None, clean: bool = True, deny_tools: list[str] | None = None) -> tuple[int, Path]:
+        context: str | None = None, clean: bool = True, deny_tools: list[str] | None = None,
+        engine: str = "ollama", engine_url: str = "http://127.0.0.1:8080",
+        engine_model: str | None = None) -> tuple[int, Path]:
     project = project.resolve()
     brief = brief_file.read_text()
+    if engine not in {"ollama", "openai"}:
+        print("--engine must be ollama or openai")
+        return 2, Path()
+    if engine == "openai" and not engine_model:
+        print("--engine-model is required with --engine openai")
+        return 2, Path()
+    if engine == "openai" and not context:
+        print("--context is required with --engine openai")
+        return 2, Path()
     if not no_submit:
         flush_outbox()  # reports that could not be sent last time (e.g. the network was down during a stall)
     memory = machine_memory()
-    saved = forge.read_config().get("model")
-    picked, picked_gb = claude.pick_model(memory)
-    model = model or saved or picked
-    model_gb = claude.MODEL_GB.get(model, picked_gb if model == picked else 0.0)
-    if not model_gb:
-        model_gb = float(_model_info(model).get("size_gb") or 0.0)  # size from Ollama for models we don't list
+    if engine == "openai":
+        model = engine_model
+        model_gb = claude.MODEL_GB.get(model, 0.0)
+    else:
+        saved = forge.read_config().get("model")
+        picked, picked_gb = claude.pick_model(memory)
+        model = model or saved or picked
+        model_gb = claude.MODEL_GB.get(model, picked_gb if model == picked else 0.0)
+        if not model_gb:
+            model_gb = float(_model_info(model).get("size_gb") or 0.0)  # size from Ollama for models we don't list
     dirty = dirty_paths(project) if from_commit else []
     if dirty:
         print(f"Note: {len(dirty)} uncommitted change(s) are not in the benchmark copy (it uses the last commit). "
               "Commit them first, or the task runs against the committed version.")
-    problem = claude.memory_problem(model, model_gb, memory)
-    if problem and not force:
-        print(f"Refusing benchmark: {problem} Use --force only if you accept the memory risk.")
-        return 2, Path()
-    cap = claude.resolve_context(model, memory, context, force) if context else claude.context_for(memory)
+    if engine == "openai":
+        cap = claude.explicit_context(context)
+        if not cap:
+            print("--context must be a number (e.g. 65536 or 64k) with --engine openai")
+            return 2, Path()
+        clean = True
+    else:
+        problem = claude.memory_problem(model, model_gb, memory)
+        if problem and not force:
+            print(f"Refusing benchmark: {problem} Use --force only if you accept the memory risk.")
+            return 2, Path()
+        cap = claude.resolve_context(model, memory, context, force) if context else claude.context_for(memory)
     if not cap:
         return 2, Path()
     run_id = dt.datetime.now(dt.UTC).strftime("%Y%m%dT%H%M%SZ") + "-" + uuid.uuid4().hex[:8]
@@ -595,16 +647,24 @@ def run(project: Path, brief_file: Path, check: str, pack: str, task: str, kind:
     check_passed = False
     changed = False
     engine_model = ""
+    report_model = model
+    engine_name = "openai-compatible" if engine == "openai" else "ollama"
     try:
-        engine_model = claude.context_model(model, cap)
-        claude._generate(engine_model, None, 0)  # start unloaded so the memory baseline excludes the model
+        if engine == "ollama":
+            engine_model = claude.context_model(model, cap)
+            if not os.environ.get("INFEROID_KEEP_LOADED"):  # opt-in warm-session measurement
+                claude._generate(engine_model, None, 0)  # start unloaded so the memory baseline excludes the model
+        else:
+            engine_model = model
         baseline = claude.system_used_gb()
-        err = claude.ensure_loaded(engine_model)
-        loaded = claude.loaded_context(engine_model) if not err else 0
-        if not err and loaded and loaded < cap:
-            err = (f"Ollama loaded {model} with a {loaded:,}-token context instead of {cap:,}; "
-                   "the result would not say anything about the model")
-            state["setup_error"] = True
+        err = ""
+        if engine == "ollama":
+            err = claude.ensure_loaded(engine_model)
+            loaded = claude.loaded_context(engine_model) if not err else 0
+            if not err and loaded and loaded < cap:
+                err = (f"Ollama loaded {model} with a {loaded:,}-token context instead of {cap:,}; "
+                       "the result would not say anything about the model")
+                state["setup_error"] = True
         if err:
             state["errors"] = [err]
             state["setup_error"] = True
@@ -612,7 +672,7 @@ def run(project: Path, brief_file: Path, check: str, pack: str, task: str, kind:
         else:
             worktree, is_git = make_isolated_copy(project, run_id, share, from_commit)
             before = _tree_snapshot(worktree)
-            args, env = command_for(worktree, engine_model, brief, cap, allow_bash or [], deny_tools)
+            args, env = command_for(worktree, engine_model, brief, cap, allow_bash or [], deny_tools, engine)
             # max-turns is a benchmark setting, so replace the command helper's default.
             args[args.index("--max-turns") + 1] = str(max_turns)
             transcript = home() / "bench" / "transcripts" / f"{run_id}.jsonl"
@@ -622,11 +682,17 @@ def run(project: Path, brief_file: Path, check: str, pack: str, task: str, kind:
             if clean:  # thinking off, no placeholder tool, no user CLAUDE.md reminders (see cleanproxy.py)
                 from .cleanproxy import CleanProxy
 
-                proxy = CleanProxy(claude.OLLAMA).start()
+                proxy = CleanProxy(claude.OLLAMA if engine == "ollama" else engine_url,
+                                   mode="openai" if engine == "openai" else "anthropic",
+                                   model=engine_model).start()
                 env["ANTHROPIC_BASE_URL"] = proxy.url
             try:
-                state = run_claude(args, env, worktree, engine_model, timeout, cap, transcript, baseline=baseline,
-                               limit=claude.default_budget(memory))
+                if engine == "openai":
+                    state = run_claude(args, env, worktree, engine_model, timeout, cap, transcript, baseline=baseline,
+                                       limit=claude.default_budget(memory), engine=engine, model_memory=model_gb)
+                else:
+                    state = run_claude(args, env, worktree, engine_model, timeout, cap, transcript, baseline=baseline,
+                                       limit=claude.default_budget(memory))
             finally:
                 if proxy:
                     state_counts = dict(proxy.counts)
@@ -636,7 +702,7 @@ def run(project: Path, brief_file: Path, check: str, pack: str, task: str, kind:
             print(f"Transcript (kept on this machine, never sent): {transcript}")
             limit = claude.default_budget(memory) - claude.PROBE_MARGIN_GB
             over = state.get("memory_stop") or float(state.get("peak_model_mem_gb", 0)) > limit
-            if over and int(state.get("turns", 0)) > 0:  # a stop before the first turn says nothing about context
+            if engine == "ollama" and over and int(state.get("turns", 0)) > 0:  # a stop before the first turn says nothing about context
                 new_cap = claude.lower_saved_context(model, memory, cap)
                 print(f"This run used more memory than the measurement predicted ({state.get('peak_model_mem_gb', 0):.1f} GB, "
                       f"{limit:.1f} GB allowed). The next run of {model} will use a {new_cap:,}-token context.")
@@ -656,7 +722,7 @@ def run(project: Path, brief_file: Path, check: str, pack: str, task: str, kind:
     finally:
         if worktree and not keep:
             remove_isolated_copy(project, worktree, is_git)
-        if engine_model:
+        if engine_model and engine == "ollama" and not os.environ.get("INFEROID_KEEP_LOADED"):
             claude._generate(engine_model, None, 0)  # unload now so the next model never stacks on this one
 
     failure = ("engine_error" if state.get("setup_error") or state.get("interrupted") else
@@ -681,8 +747,10 @@ def run(project: Path, brief_file: Path, check: str, pack: str, task: str, kind:
               "memory_pressure": state.get("memory_pressure", "normal")}
     report: dict[str, Any] = {"schema": 1, "inferoid_version": __version__,
                               "submitted_at": dt.datetime.now(dt.UTC).isoformat().replace("+00:00", "Z"),
-                              "machine": _machine_info(memory), "engine": {"name": "ollama", "version": _engine_version()},
-                              "model": _model_info(model), "task": {"pack": pack, "id": task, "kind": kind},
+                              "machine": _machine_info(memory), "engine": {"name": engine_name,
+                                                                             "version": _engine_version() if engine == "ollama" else _openai_engine_version(engine_url)},
+                              "model": _model_info(report_model) if engine == "ollama" else _openai_model_info(report_model, model_gb),
+                              "task": {"pack": pack, "id": task, "kind": kind},
                               "settings": {"context_cap": cap, "lean": True, "effort": "low", "timeout_s": timeout,
                                            "clean": clean},
                               "result": result}
@@ -693,7 +761,7 @@ def run(project: Path, brief_file: Path, check: str, pack: str, task: str, kind:
         report["reference"] = {key: ref[key] for key in ("model", "status", "wall_s", "tool_calls") if key in ref}
     if state.get("errors") or state.get("clean_changes"):
         # Kept in the local file for debugging; allowlisted_report() never sends it.
-        report["local_only"] = {"errors": [str(e)[:300] for e in state.get("errors", [])[:5]],
+        report["local_only"] = {"sandbox": state.get("sandbox", "none"), "errors": [str(e)[:300] for e in state.get("errors", [])[:5]],
                                 "clean_changes": state.get("clean_changes", {}),
                                 "max_sample_gap_s": state.get("max_sample_gap_s", 0.0)}
     path = write_report(report)

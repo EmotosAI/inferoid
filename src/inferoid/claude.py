@@ -38,6 +38,9 @@ if not OLLAMA.startswith("http"):
     OLLAMA = "http://" + OLLAMA
 MAX_REPLY_TOKENS = 4096  # per reply; Claude Code reserves this from the window, so smaller leaves more context
 LOCAL_CONTEXT = 32768  # floor; the real cap comes from context_for(memory)
+OPENAI_ENGINE_URL = "http://127.0.0.1:8080"
+PROVIDER_ENV = {"CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX", "CLAUDE_CODE_USE_FOUNDRY", "CLAUDE_CODE_SUBAGENT_MODEL",
+                "CLOUD_ML_REGION", "GOOGLE_APPLICATION_CREDENTIALS", "OPENAI_API_KEY", "OPENROUTER_API_KEY"}
 
 # Memory safety (2026-11-11: a 24 GB Mac froze when Nemotron grew to ~94K tokens of context with the GPU limit
 # raised to 21 GB). Models are picked to fit macOS's DEFAULT GPU budget; the limit is never raised automatically.
@@ -565,6 +568,31 @@ def kv_estimate_gb(model: str, tokens: int) -> float:
     def pick(suffix: str) -> Any:
         return next((v for k, v in info.items() if k.endswith(suffix)), None)
 
+    lora = pick(".attention.kv_lora_rank")
+    if isinstance(lora, int) and lora > 0 and pick(".block_count"):
+        # Multi-head latent attention (DeepSeek, GLM-4.7-Flash): the cache keeps one compressed latent plus the rotary
+        # part per layer, not full keys and values per head (GLM REAP-23B ran at 32K in ~12 GB; the per-head count said 16).
+        rope = pick(".rope.dimension_count") or 64
+        return int(pick(".block_count")) * (lora + int(rope)) * 2 * tokens / 1e9
+
+    pattern = pick(".attention.sliding_window_pattern")
+    window = pick(".attention.sliding_window")
+    if isinstance(pattern, list) and pattern and isinstance(window, int) and window > 0:
+        # Sliding-window models (Gemma): most layers keep only `window` tokens, often with smaller heads.
+        heads = pick(".attention.head_count_kv")
+        k_full, v_full = pick(".attention.key_length") or 0, pick(".attention.value_length") or 0
+        k_swa = pick(".attention.key_length_swa") or k_full
+        v_swa = pick(".attention.value_length_swa") or v_full
+        total = 0
+        for i, sliding in enumerate(pattern):
+            h = heads[i] if isinstance(heads, list) and i < len(heads) else (heads or 0)
+            if sliding:
+                total += int(h) * (int(k_swa) + int(v_swa)) * 2 * min(tokens, window)
+            else:
+                total += int(h) * (int(k_full) + int(v_full)) * 2 * tokens
+        if total:
+            return total / 1e9
+
     layers = pick(".block_count")
     kv_heads = pick(".attention.head_count_kv")
     key_len = pick(".attention.key_length") or (
@@ -637,11 +665,22 @@ def resolve_context(model: str, memory: dict[str, float], context: str | int | N
     return 0
 
 
+def explicit_context(context: str | int | None) -> int:
+    """Parse a context supplied to a non-Ollama engine without probing Ollama."""
+    if context is None or str(context).lower() in ("", "max", "remeasure"):
+        return 0
+    try:
+        value = str(context).lower()
+        return int(value.removesuffix("k")) * (1024 if value.endswith("k") else 1)
+    except ValueError:
+        return 0
+
+
 def context_model(model: str, cap: int, run: Callable[..., Any] = subprocess.run) -> str:
     """Ollama tag with num_ctx baked in. Some models (e.g. hf.co GGUF imports) carry their own num_ctx (often 4096)
     and Claude Code never sends one, so OLLAMA_CONTEXT_LENGTH alone is not enough. Reuses the same weight blobs.
     Copies the base model's whole Modelfile (TEMPLATE, RENDERER, PARSER, stop words): a bare FROM can lose the
-    chat format, which leaks thinking markers like <channel|> and breaks tool calls. Rebuilt every time (cheap),
+    chat format, which leaks thinking markers like <channel|> and breaks tool calls. Rebuilt every time (quickly),
     so a fixed base model fixes its copies too."""
     base = re.sub(r"[^a-z0-9._-]+", "-", model.lower().removeprefix("hf.co/")).strip("-.")
     name = f"{base}-ctx{cap // 1024}k"
@@ -702,10 +741,11 @@ def model_label(model: str) -> str:
     return MODEL_LABELS.get(model, model)
 
 
-def picker_settings(model: str) -> str:
-    """Session-only /model list: just the local model, so no Claude model is offered against Ollama."""
+def picker_settings(model: str, engine: str = "ollama") -> str:
+    """Session-only /model list: just the configured local model."""
+    label = "OpenAI-compatible engine" if engine == "openai" else "Ollama"
     row = {"model": model, "label": f"{model_label(model)} (local, free)",
-           "description": "Runs on this Mac through Ollama. Your Claude login is not used."}
+           "description": f"Runs on this Mac through {label}. Your Claude login is not used."}
     # disableAllHooks: plugin hooks (e.g. a SessionStart hook that tells the model to load skills) cost the local model
     # minutes of reading on every new session; the local session needs none of them.
     return json.dumps({"modelPicker": {"options": [row], "replaceBuiltInOptions": True}, "disableAllHooks": True})
@@ -717,14 +757,25 @@ LEAN_TOOLS = "Bash,Read,Edit,Write,Glob,Grep"
 LEAN_ARGS = ["--strict-mcp-config", "--disable-slash-commands", "--tools", LEAN_TOOLS, "--effort", "low"]
 
 
+def reply_cap(context: int) -> int:
+    """Per-reply output cap. Claude Code reserves it from the window, so small windows need a small cap, but Claude
+    Code ENDS the session when a reply exceeds it (LFM2.5 wrote a whole plan in one reply at 4,096 and was cut off).
+    4,096 below 40K of context (32K windows), 8,192 from 40K."""
+    return MAX_REPLY_TOKENS if context < 40000 else 2 * MAX_REPLY_TOKENS
+
+
 def local_command(project: Path, model: str, resume: bool, full: bool = False,
-                  context: int = LOCAL_CONTEXT) -> tuple[list[str], dict[str, str], str]:
+                  context: int = LOCAL_CONTEXT, base_url: str | None = None,
+                  engine: str = "ollama") -> tuple[list[str], dict[str, str], str]:
     # Claude Code compacts the conversation before it reaches this, so the local context never grows past the cap.
-    env = dict(os.environ, ANTHROPIC_BASE_URL=OLLAMA, ANTHROPIC_AUTH_TOKEN="ollama", ANTHROPIC_API_KEY="",
+    # A supervisor's Claude Code may run on Bedrock/Vertex/a gateway; its provider settings and keys must not reach
+    # the local session (they override ANTHROPIC_BASE_URL and leak credentials to the worker).
+    base_env = {k: v for k, v in os.environ.items() if k not in PROVIDER_ENV and not k.startswith(("AWS_", "ANTHROPIC_"))}
+    env = dict(base_env, ANTHROPIC_BASE_URL=base_url or OLLAMA, ANTHROPIC_AUTH_TOKEN="ollama", ANTHROPIC_API_KEY="",
                CLAUDE_CODE_MAX_CONTEXT_TOKENS=str(context),
                # One reply may not run away (gemma4 thought for 18K tokens without ending its turn).
-               CLAUDE_CODE_MAX_OUTPUT_TOKENS=os.environ.get("INFEROID_MAX_REPLY_TOKENS", str(MAX_REPLY_TOKENS)))
-    args = ["claude", "--model", model, "--settings", picker_settings(model)] + ([] if full else LEAN_ARGS)
+               CLAUDE_CODE_MAX_OUTPUT_TOKENS=os.environ.get("INFEROID_MAX_REPLY_TOKENS", str(reply_cap(context))))
+    args = ["claude", "--model", model, "--settings", picker_settings(model, engine)] + ([] if full else LEAN_ARGS)
     if resume:
         return args + ["--continue"], env, "resume"
     if (project / "HANDOFF.md").exists():
@@ -733,42 +784,64 @@ def local_command(project: Path, model: str, resume: bool, full: bool = False,
 
 
 def local(project: Path, model: str | None, resume: bool, dry_run: bool = False, full: bool = False,
-          allow_gpu_limit: bool = False, context: str | None = None, clean: bool = True) -> int:
+          allow_gpu_limit: bool = False, context: str | None = None, clean: bool = True,
+          engine: str = "ollama", engine_url: str = OPENAI_ENGINE_URL, engine_model: str | None = None) -> int:
     from .night import machine_memory
 
     memory = machine_memory()
-    picked, gb = pick_model(memory)
-    saved = _read(state_dir().parent / "config.json", {}).get("model")
-    if saved in REPLACED_DEFAULTS and not model:
-        print(f"Using {REPLACED_DEFAULTS[saved]}, the faster build of your saved model (run inferoid setup to change).")
-        saved = REPLACED_DEFAULTS[saved]
-    model = model or saved or picked
-    gb = MODEL_GB.get(model, gb if model == picked else 0.0)
-    notes = preflight(model, gb, memory)
-    want = gpu_limit_needed(model, gb, memory)
-    if want and allow_gpu_limit and not dry_run:
-        def ask(question: str) -> bool:
-            return input(question + " (y/N) ").strip().lower() in ("y", "yes")
-        if raise_gpu_limit(want, ask):
-            notes = [n for n in notes if not n.startswith("memory:")]
-    for note in notes:
-        print(note.replace("hint: ", "").replace("memory: ", ""))
-    if any(not n.startswith("hint:") for n in notes) and not dry_run:
-        return 1
-    cap = saved_context(model, memory) or context_for(memory)
-    if context and not dry_run:
-        cap = resolve_context(model, memory, context)
+    if engine not in {"ollama", "openai"}:
+        print("--engine must be ollama or openai")
+        return 2
+    if engine == "openai":
+        if not context:
+            print("--context is required with --engine openai")
+            return 2
+        if not engine_model:
+            print("--engine-model is required with --engine openai")
+            return 2
+        cap = explicit_context(context)
         if not cap:
+            print("--context must be a number (e.g. 65536 or 64k) with --engine openai")
+            return 2
+        model = engine_model
+        gb = MODEL_GB.get(model, 0.0)
+        notes: list[str] = []
+        clean = True
+    else:
+        cap = 0
+        picked, gb = pick_model(memory)
+    if engine == "ollama":
+        saved = _read(state_dir().parent / "config.json", {}).get("model")
+        if saved in REPLACED_DEFAULTS and not model:
+            print(f"Using {REPLACED_DEFAULTS[saved]}, the faster build of your saved model (run inferoid setup to change).")
+            saved = REPLACED_DEFAULTS[saved]
+        model = model or saved or picked
+        gb = MODEL_GB.get(model, gb if model == picked else 0.0)
+        notes = preflight(model, gb, memory)
+        want = gpu_limit_needed(model, gb, memory)
+        if want and allow_gpu_limit and not dry_run:
+            def ask(question: str) -> bool:
+                return input(question + " (y/N) ").strip().lower() in ("y", "yes")
+            if raise_gpu_limit(want, ask):
+                notes = [n for n in notes if not n.startswith("memory:")]
+        for note in notes:
+            print(note.replace("hint: ", "").replace("memory: ", ""))
+        if any(not n.startswith("hint:") for n in notes) and not dry_run:
             return 1
-    if not dry_run:
-        model = context_model(model, cap)  # bake the cap into the Ollama tag the session uses
-        err = ensure_loaded(model)
-        if err:
-            print(f"Ollama could not load {model}: {err}")
-            if "GiB" in err:
-                print("Fix: " + (memory_problem(model, gb, memory) or "quit and reopen the Ollama app, then run claude-local again."))
-            return 1
-    args, env, mode = local_command(project, model, resume, full, cap)
+        cap = saved_context(model, memory) or context_for(memory)
+        if context and not dry_run:
+            cap = resolve_context(model, memory, context)
+            if not cap:
+                return 1
+        if not dry_run:
+            model = context_model(model, cap)  # bake the cap into the Ollama tag the session uses
+            err = ensure_loaded(model)
+            if err:
+                print(f"Ollama could not load {model}: {err}")
+                if "GiB" in err:
+                    print("Fix: " + (memory_problem(model, gb, memory) or "quit and reopen the Ollama app, then run claude-local again."))
+                return 1
+    args, env, mode = local_command(project, model, resume, full, cap, engine=engine)
     if mode == "plain":
         print("No HANDOFF.md here, so the local model starts without a plan. Use --resume to continue the last session instead.")
     hit = _read(state_dir() / "limit-hit.json", {})
@@ -791,7 +864,8 @@ def local(project: Path, model: str | None, resume: bool, dry_run: bool = False,
         os.execvpe("claude", args, env)
     from .cleanproxy import CleanProxy
 
-    proxy = CleanProxy(OLLAMA).start()
+    proxy = CleanProxy(OLLAMA if engine == "ollama" else engine_url,
+                       mode="openai" if engine == "openai" else "anthropic", model=model).start()
     env["ANTHROPIC_BASE_URL"] = proxy.url
     import signal
 

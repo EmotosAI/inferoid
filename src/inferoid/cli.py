@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import argparse
-import sys
 import json
 import os
+import sys
+from pathlib import Path
 
 from . import APP_NAME
 from .analysis import classify, machine
@@ -68,7 +69,7 @@ def claude_main(args: argparse.Namespace) -> int:
         print("\n".join(claude.uninstall(project, args.global_)))
     elif args.claude_command == "local":
         return claude.local(project, args.model, args.resume, args.dry_run, args.full, args.allow_gpu_limit,
-                            args.context, args.clean)
+                            args.context, args.clean, args.engine, args.engine_url, args.engine_model)
     elif args.claude_command == "status":
         print("\n".join(claude.status(project)))
     elif args.claude_command == "statusline":
@@ -110,6 +111,25 @@ def build_parser() -> argparse.ArgumentParser:
     night_cmds.choices["schedule"].add_argument("--at", default="01:00", help="HH:MM local time")
     st = commands.add_parser("setup", help="Pick and download a local model and connect it to your coding agent")
     st.add_argument("--project", default=".")
+    st.add_argument("--supervisor", choices=("claude", "codex", "cursor", "all"))
+    run_local = commands.add_parser("run", help="Delegate one checked chore to the local model")
+    run_local.add_argument("task")
+    run_local.add_argument("--check")
+    run_local.add_argument("--files", action="append", default=[])
+    run_local.add_argument("--model")
+    run_local.add_argument("--engine", choices=("ollama", "openai"), default="ollama")
+    run_local.add_argument("--engine-url", default="http://127.0.0.1:8080")
+    run_local.add_argument("--engine-model")
+    run_local.add_argument("--context")
+    run_local.add_argument("--timeout", type=int, default=900)
+    run_local.add_argument("--max-turns", type=int, default=200)
+    run_local.add_argument("--allow-bash", action="append", default=[])
+    run_local.add_argument("--deny-tool", action="append", default=[])
+    run_local.add_argument("--share", action="store_true", help="Submit a metrics-only report to Forge")
+    run_local.add_argument("--json", action="store_true")
+    run_local.add_argument("--no-sandbox", action="store_true",
+                           help="Run the local worker without the macOS sandbox (it then can write anywhere and reach the internet)")
+    commands.add_parser("mcp", help="Run the stdio MCP server")
     bench = commands.add_parser("bench", help="Run isolated Claude Code benchmarks on local models")
     bench_cmds = bench.add_subparsers(dest="bench_command", required=True)
     run_bench = bench_cmds.add_parser("run")
@@ -120,6 +140,9 @@ def build_parser() -> argparse.ArgumentParser:
     run_bench.add_argument("--task", required=True)
     run_bench.add_argument("--kind", default="coding")
     run_bench.add_argument("--model")
+    run_bench.add_argument("--engine", choices=("ollama", "openai"), default="ollama")
+    run_bench.add_argument("--engine-url", default="http://127.0.0.1:8080")
+    run_bench.add_argument("--engine-model", help="Model name expected by an OpenAI-compatible engine")
     run_bench.add_argument("--timeout", type=int, default=1800)
     run_bench.add_argument("--context", help="Context size: a number (65536 or 64k) or 'max' to measure the largest safe one")
     run_bench.add_argument("--max-turns", type=int, default=200)  # time, not turns, should end a bench
@@ -129,9 +152,10 @@ def build_parser() -> argparse.ArgumentParser:
     run_bench.add_argument("--reference")
     run_bench.add_argument("--no-submit", action="store_true")
     run_bench.add_argument("--force", action="store_true")
+    run_bench.add_argument("--no-sandbox", action="store_true",
+                           help="Run the local worker without the macOS sandbox (it then can write anywhere and reach the internet)")
     run_bench.add_argument("--no-clean", dest="clean", action="store_false",
-                           help="Send Claude Code's requests to Ollama unchanged (clean mode disables thinking and drops "
-                                "the placeholder tool and your CLAUDE.md reminders)")
+                           help="For Ollama, send Claude Code's requests unchanged (OpenAI mode always uses the translator)")
     run_bench.add_argument("--keep", action="store_true")
     run_bench.add_argument("--from-commit", action="store_true",
                            help="Benchmark the last commit instead of the current working tree")
@@ -157,10 +181,14 @@ def build_parser() -> argparse.ArgumentParser:
     loc = cl_cmds.add_parser("local", help="Continue in Claude Code on a local Ollama model")
     loc.add_argument("--project", default=".")
     loc.add_argument("--model", help="Ollama model (default: picked by memory)")
+    loc.add_argument("--engine", choices=("ollama", "openai"), default="ollama")
+    loc.add_argument("--engine-url", default="http://127.0.0.1:8080")
+    loc.add_argument("--engine-model", help="Model name expected by an OpenAI-compatible engine")
     loc.add_argument("--context", help="Context size: a number (65536 or 64k) or 'max' to measure the largest safe one")
     loc.add_argument("--resume", action="store_true", help="Resume the last session instead of starting from HANDOFF.md")
     loc.add_argument("--dry-run", action="store_true")
-    loc.add_argument("--no-clean", dest="clean", action="store_false", help="Send requests to Ollama unchanged")
+    loc.add_argument("--no-clean", dest="clean", action="store_false",
+                     help="For Ollama, send requests unchanged (OpenAI mode always uses the translator)")
     loc.add_argument("--full", action="store_true", help="Load MCP servers, skills and all tools (much slower first reply)")
     loc.add_argument("--allow-gpu-limit", action="store_true",
                      help="Offer to raise the macOS GPU memory limit when the model needs it (only if macOS keeps 4 GB)")
@@ -194,27 +222,60 @@ def main(argv: list[str] | None = None) -> int:
     elif args.command == "claude":
         return claude_main(args)
     elif args.command == "setup":
-        from pathlib import Path
-
         from .setup import run
 
-        return run(Path(args.project).resolve())
+        return run(Path(args.project).resolve(), supervisor=args.supervisor)
+    elif args.command == "run":
+        from .dispatch import run_task
+
+        if args.no_sandbox:
+            os.environ["INFEROID_SANDBOX"] = "0"
+
+        value = run_task(project=Path.cwd(), task=args.task, check=args.check, files=args.files, model=args.model,
+                         engine=args.engine, engine_url=args.engine_url, engine_model=args.engine_model,
+                         context=args.context, timeout=args.timeout, max_turns=args.max_turns,
+                         allow_bash=args.allow_bash, deny_tools=args.deny_tool, share=args.share)
+        if args.share and value.get("_report"):
+            from . import forge
+
+            metrics_report = value.pop("_report")
+            try:
+                ok, message, verdict = forge.submit(metrics_report)
+                value.setdefault("notes", []).append(message if not ok else "Metrics report submitted")
+                if verdict:
+                    value["verdict"] = verdict
+            except (OSError, TypeError, ValueError) as exc:
+                value.setdefault("notes", []).append(f"Metrics report could not be submitted: {exc}")
+        value.pop("_report", None)
+        if args.json:
+            print(json.dumps(value, sort_keys=True))
+        else:
+            print(f"{value['status']}: {len(value.get('files_changed', []))} file(s), {value.get('wall_s', 0):.1f}s")
+            if value.get("notes"):
+                print("; ".join(value["notes"][-3:]))
+        return 0 if value.get("status") == "done" else 1
+    elif args.command == "mcp":
+        from .mcp import serve
+
+        serve()
+        return 0
     elif args.command == "bench":
+        if getattr(args, "no_sandbox", False):
+            os.environ["INFEROID_SANDBOX"] = "0"
         import signal
 
         def stop(signum, frame):  # treat kill/hangup like Ctrl+C: stop the run but still write the report
             raise KeyboardInterrupt
         for sig in (signal.SIGTERM, signal.SIGHUP):
             signal.signal(sig, stop)
-        from pathlib import Path
-
         from . import bench
 
         if args.bench_command == "run":
             code, _ = bench.run(Path(args.repo), Path(args.brief), args.check, args.pack, args.task,
                                  args.kind, args.model, args.timeout, args.max_turns, args.allow_bash,
                                  Path(args.reference) if args.reference else None, args.no_submit, args.force, args.keep,
-                                 args.share, args.from_commit, args.context, args.clean, args.deny_tool)
+                                 args.share, args.from_commit, args.context, args.clean, args.deny_tool,
+                                 args.engine, args.engine_url, args.engine_model)
             return code
         if args.bench_command == "submit":
             return bench.submit_files([Path(path) for path in args.files])

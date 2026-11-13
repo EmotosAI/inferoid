@@ -388,3 +388,38 @@ def test_denied_tools_are_hidden_and_not_allowed(tmp_path):
     assert "Edit" not in tools and "Write" not in tools and "Bash" in tools
     allowed = args[args.index("--allowedTools") + 1:]
     assert "Edit" not in allowed and "Bash(cp *)" in allowed
+
+
+def test_openai_engine_skips_ollama_setup_and_requires_context(tmp_path, monkeypatch):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git_repo(repo)
+    brief = tmp_path / "brief.md"
+    brief.write_text("Do the task.")
+    monkeypatch.setenv("INFEROID_HOME", str(tmp_path / "inferoid"))
+    monkeypatch.setattr(bench, "machine_memory", lambda: {"ram_gb": 24.0, "wired_limit_gb": 0.0})
+    monkeypatch.setattr(bench, "_openai_engine_version", lambda url: "server-test")
+    monkeypatch.setattr(claude, "context_model", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("Ollama context setup")))
+    monkeypatch.setattr(claude, "ensure_loaded", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("Ollama load")))
+    monkeypatch.setattr(claude, "_generate", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("Ollama generate")))
+    monkeypatch.setattr(claude, "resolve_context", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("Ollama probe")))
+    monkeypatch.setattr(claude, "_ollama", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("Ollama API")))
+
+    def fake_run(*args, **kwargs):
+        worktree = args[2]
+        (worktree / "done.txt").write_text("done\n")
+        return {"first_reply_s": 0.1, "turns": 1, "tool_calls": 1, "input_tokens": 2, "output_tokens": 3,
+                "result_seen": True, "errors": [], "timed_out": False, "returncode": 0, "wall_s": 0.2,
+                "peak_model_mem_gb": 0.0, "peak_swap_gb": 0.0, "memory_pressure": "normal"}
+
+    monkeypatch.setattr(bench, "run_claude", fake_run)
+    missing, _ = bench.run(repo, brief, "test -f done.txt", "pack", "missing-context", engine="openai",
+                           engine_model="PATH", no_submit=True)
+    assert missing == 2
+    code, report_path = bench.run(repo, brief, "test -f done.txt", "pack", "openai-task", engine="openai",
+                                  engine_url="http://127.0.0.1:9", engine_model="PATH", context="65536", no_submit=True,
+                                  clean=False)
+    assert code == 0
+    report = json.loads(report_path.read_text())
+    assert report["engine"] == {"name": "openai-compatible", "version": "server-test"}
+    assert report["settings"]["clean"] is True

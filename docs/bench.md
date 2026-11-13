@@ -77,3 +77,15 @@ inferoid creates an Ollama tag with your machine's context cap built in (for exa
 Each run keeps the full Claude Code transcript on your machine (`~/.inferoid/bench/transcripts/`, readable only by you) so you or your agent can see why a model failed. Transcripts are never sent to Forge.
 
 Run one model at a time: wait for a run to finish (or press Ctrl+C) before starting the next.
+
+## Other engines (mlx_lm, llama-server)
+
+Start an OpenAI-compatible server, then point the benchmark at it with an explicit context:
+
+```sh
+mlx_lm.server --model PATH --port 8080
+inferoid bench run --repo . --brief tasks/fix.md --check "uv run --with pytest pytest -q" \
+  --pack my-pack --task fix-v1 --engine openai --engine-model PATH --context 65536
+```
+
+The same options work with `llama-server` when its OpenAI endpoint is at `http://127.0.0.1:8080`.

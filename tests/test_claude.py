@@ -230,7 +230,7 @@ def test_measured_context_is_saved_and_reused(monkeypatch, tmp_path):
 
 def test_local_env_caps_reply_tokens():
     _, env, _ = claude.local_command(Path("."), "m", False, False, 32768)
-    assert env["CLAUDE_CODE_MAX_OUTPUT_TOKENS"] == "4096"
+    assert env["CLAUDE_CODE_MAX_OUTPUT_TOKENS"] == "4096" and claude.reply_cap(65536) == 8192 and claude.reply_cap(49152) == 8192
 
 
 def test_over_limit_run_lowers_saved_context(monkeypatch, tmp_path):
@@ -254,3 +254,47 @@ def test_kv_estimate_counts_only_attention_layers_in_hybrids(monkeypatch):
     monkeypatch.setattr(claude.urllib.request, "urlopen", lambda *a, **k: R())
     gb = claude.kv_estimate_gb("q", 65536)
     assert 1.2 < gb < 1.5  # 10 attention layers, not 40
+
+
+def test_local_session_drops_supervisor_provider_settings(monkeypatch):
+    monkeypatch.setenv("CLAUDE_CODE_USE_BEDROCK", "1")
+    monkeypatch.setenv("AWS_BEARER_TOKEN_BEDROCK", "secret")
+    monkeypatch.setenv("ANTHROPIC_DEFAULT_SONNET_MODEL", "us.anthropic.x")
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-x")
+    _, env, _ = claude.local_command(Path("."), "m", False, False, 32768)
+    for k in ("CLAUDE_CODE_USE_BEDROCK", "AWS_BEARER_TOKEN_BEDROCK", "ANTHROPIC_DEFAULT_SONNET_MODEL", "OPENROUTER_API_KEY"):
+        assert k not in env
+    assert env["ANTHROPIC_BASE_URL"].startswith("http://127.0.0.1")
+
+
+def test_kv_estimate_sliding_window_layers(monkeypatch):
+    info = {"gemma4.block_count": 30, "gemma4.attention.head_count_kv": [8, 8, 8, 8, 8, 2] * 5,
+            "gemma4.attention.sliding_window_pattern": [True] * 5 + [False] + [True] * 5 + [False] + [True] * 5 + [False]
+            + [True] * 5 + [False] + [True] * 5 + [False],
+            "gemma4.attention.sliding_window": 1024, "gemma4.attention.key_length": 512, "gemma4.attention.value_length": 512,
+            "gemma4.attention.key_length_swa": 256, "gemma4.attention.value_length_swa": 256}
+
+    class R:
+        def __init__(self, *a, **k): pass
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+        def read(self): return json.dumps({"model_info": info}).encode()
+
+    monkeypatch.setattr(claude.urllib.request, "urlopen", lambda *a, **k: R())
+    gb = claude.kv_estimate_gb("g", 65536)
+    assert 1.4 < gb < 1.7  # 5 full layers at 64K + 25 windowed layers at 1K, not 30 full layers (~40 GB)
+
+
+def test_kv_estimate_multi_head_latent_attention(monkeypatch):
+    info = {"deepseek2.block_count": 47, "deepseek2.attention.kv_lora_rank": 512, "deepseek2.rope.dimension_count": 64,
+            "deepseek2.attention.head_count_kv": 20, "deepseek2.attention.key_length": 576}
+
+    class R:
+        def __init__(self, *a, **k): pass
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+        def read(self): return json.dumps({"model_info": info}).encode()
+
+    monkeypatch.setattr(claude.urllib.request, "urlopen", lambda *a, **k: R())
+    gb = claude.kv_estimate_gb("glm", 32768)
+    assert 1.6 < gb < 1.9  # 47 layers x (512+64) x 2 bytes x 32K, not per-head full keys/values

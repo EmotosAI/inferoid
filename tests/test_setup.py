@@ -55,3 +55,13 @@ def test_setup_stops_on_old_claude_or_no_ollama(tmp_path, monkeypatch):
     lines.clear()
     assert setup.run(tmp_path, answers={}, out=lines.append, claude_version=lambda: "2.1.322", bin_dir=tmp_path / "b") == 1
     assert "not running" in lines[-1]
+
+
+def test_setup_reports_sandbox_state(tmp_path, monkeypatch):
+    _env(tmp_path, monkeypatch, [])
+    lines = []
+    rc = setup.run(tmp_path / "proj", answers={}, out=lines.append, pull=lambda m: 0,
+                   claude_version=lambda: "2.1.322 (Claude Code)", bin_dir=tmp_path / "bin",
+                   gpu_raiser=lambda mb, ask: ask("q"), reporter=lambda: "", sandbox_checker=lambda: "verified")
+    text = "\n".join(lines)
+    assert rc == 0 and "Sandbox         verified on this Mac" in text and "local_agent" in text
