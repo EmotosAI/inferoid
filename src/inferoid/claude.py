@@ -568,6 +568,13 @@ def kv_estimate_gb(model: str, tokens: int) -> float:
     def pick(suffix: str) -> Any:
         return next((v for k, v in info.items() if k.endswith(suffix)), None)
 
+    lora = pick(".attention.kv_lora_rank")
+    if isinstance(lora, int) and lora > 0 and pick(".block_count"):
+        # Multi-head latent attention (DeepSeek, GLM-4.7-Flash): the cache keeps one compressed latent plus the rotary
+        # part per layer, not full keys and values per head (GLM REAP-23B ran at 32K in ~12 GB; the per-head count said 16).
+        rope = pick(".rope.dimension_count") or 64
+        return int(pick(".block_count")) * (lora + int(rope)) * 2 * tokens / 1e9
+
     pattern = pick(".attention.sliding_window_pattern")
     window = pick(".attention.sliding_window")
     if isinstance(pattern, list) and pattern and isinstance(window, int) and window > 0:

@@ -283,3 +283,18 @@ def test_kv_estimate_sliding_window_layers(monkeypatch):
     monkeypatch.setattr(claude.urllib.request, "urlopen", lambda *a, **k: R())
     gb = claude.kv_estimate_gb("g", 65536)
     assert 1.4 < gb < 1.7  # 5 full layers at 64K + 25 windowed layers at 1K, not 30 full layers (~40 GB)
+
+
+def test_kv_estimate_multi_head_latent_attention(monkeypatch):
+    info = {"deepseek2.block_count": 47, "deepseek2.attention.kv_lora_rank": 512, "deepseek2.rope.dimension_count": 64,
+            "deepseek2.attention.head_count_kv": 20, "deepseek2.attention.key_length": 576}
+
+    class R:
+        def __init__(self, *a, **k): pass
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+        def read(self): return json.dumps({"model_info": info}).encode()
+
+    monkeypatch.setattr(claude.urllib.request, "urlopen", lambda *a, **k: R())
+    gb = claude.kv_estimate_gb("glm", 32768)
+    assert 1.6 < gb < 1.9  # 47 layers x (512+64) x 2 bytes x 32K, not per-head full keys/values
