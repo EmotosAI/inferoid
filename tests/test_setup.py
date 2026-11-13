@@ -82,10 +82,10 @@ def test_setup_learn_option_links_benchmark_then_picks(tmp_path, monkeypatch):
 def test_setup_coding_on_16gb_falls_back(tmp_path, monkeypatch):
     _env(tmp_path, monkeypatch, [], ram=16.0)
     lines = []
-    rc = setup.run(tmp_path, answers={"report": "n"}, out=lines.append, pull=lambda m: 0,
+    rc = setup.run(tmp_path, answers={"report": "n", "cloud_choice": "3"}, out=lines.append, pull=lambda m: 0,
                    claude_version=lambda: "2.1.322", bin_dir=tmp_path / "bin")
     text = "\n".join(lines)
-    assert rc == 0 and "need more memory than this machine has" in text
+    assert rc == 0 and "Local coding models need 24 GB; this machine has 16 GB" in text
     assert json.loads(setup.config_path().read_text())["model"] == "nemotron-3.5-bolt:e4b"
 
 
@@ -100,3 +100,41 @@ def test_nvidia_gpu_memory_decides_fit(tmp_path, monkeypatch):
     text = "\n".join(lines)
     assert rc == 0 and "GPU NVIDIA A10G with 24 GB" in text
     assert json.loads(setup.config_path().read_text())["model"] == setup.WORKLOADS["coding"]["models"][0][0]
+
+
+def test_small_mac_hands_off_to_luna_in_codex(tmp_path, monkeypatch):
+    _env(tmp_path, monkeypatch, [], ram=16.0)
+    monkeypatch.setattr(setup.cloud, "codex_installed", lambda: False)
+    installed, lines = [], []
+    rc = setup.run(tmp_path, answers={"report": "n"}, out=lines.append, pull=lambda m: 1 / 0,  # no Ollama download
+                   claude_version=lambda: "2.1.322", bin_dir=tmp_path / "bin", codex_installer=lambda: installed.append(1) or 0)
+    text = "\n".join(lines)
+    cfg = json.loads(setup.config_path().read_text())
+    assert rc == 0 and installed == [1] and "codex login" in text
+    assert cfg["fallback"] == {"kind": "codex"} and cfg["threshold"] == 70.0
+    assert "GPT-6 Luna in Codex takes over from HANDOFF.md" in text and "claude-next" in text
+    assert "inferoid next" in (tmp_path / "bin" / "claude-next").read_text()
+
+
+def test_small_mac_openrouter_saves_key_privately(tmp_path, monkeypatch):
+    _env(tmp_path, monkeypatch, [], ram=8.0)
+    lines = []
+    rc = setup.run(tmp_path, answers={"report": "n", "cloud_choice": "2", "openrouter_key": "sk-or-test"}, out=lines.append,
+                   pull=lambda m: 1 / 0, claude_version=lambda: "2.1.322", bin_dir=tmp_path / "bin",
+                   key_checker=lambda k: {"ok": True, "free_tier": True, "error": ""})
+    text = "\n".join(lines)
+    assert rc == 0 and "1,000 a day" in text and "free endpoints may keep prompts" in text
+    cfg = json.loads(setup.config_path().read_text())
+    assert cfg["fallback"]["kind"] == "openrouter" and "sk-or-test" not in json.dumps(cfg)
+    sec = setup.cloud.secrets_path()
+    assert json.loads(sec.read_text())["openrouter_api_key"] == "sk-or-test" and oct(sec.stat().st_mode)[-3:] == "600"
+    args, env, _ = setup.cloud.next_command(tmp_path, cfg["fallback"])
+    assert args[:3] == ["claude", "--model", setup.cloud.OPENROUTER_MODEL]
+    assert env["ANTHROPIC_BASE_URL"] == "https://openrouter.ai/api" and env["ANTHROPIC_AUTH_TOKEN"] == "sk-or-test"
+    assert env["ANTHROPIC_DEFAULT_OPUS_MODEL"] == setup.cloud.OPENROUTER_MODEL
+
+
+def test_next_codex_starts_from_handoff(tmp_path):
+    (tmp_path / "HANDOFF.md").write_text("# plan")
+    args, env, label = setup.cloud.next_command(tmp_path, {"kind": "codex"})
+    assert args[0] == "codex" and "HANDOFF.md" in args[-1] and env is None and "Luna" in label

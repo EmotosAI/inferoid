@@ -13,11 +13,13 @@ from pathlib import Path
 from typing import Any
 from collections.abc import Callable
 
-from . import claude, sandbox
+from . import claude, cloud, sandbox
 from .night import machine_memory
 
 MIN_CLAUDE = (2, 1, 242)  # --settings modelPicker
 LAUNCHER = "claude-local"
+NEXT_LAUNCHER = "claude-next"
+CLOUD_THRESHOLD = 70.0  # cloud fallback: start the handoff early, while Claude still has room to write a good plan
 CHOICES = [
     ("nemotron-3.5-lightning:30b-a3b-mlx", 24, "fastest in our 24 GB handover test; this MLX build reads and writes faster on Apple chips"),
     ("gpt-oss:20b", 24, "second in the same test"),
@@ -68,6 +70,13 @@ class Prompter:
             return str(self.answers.get(key, default))
         reply = input(f"{question} [{default}]: ").strip()
         return reply or default
+
+    def secret(self, key: str, question: str) -> str:
+        """Like ask, but nothing is echoed (API keys)."""
+        if self.answers is not None:
+            return str(self.answers.get(key, ""))
+        import getpass
+        return getpass.getpass(f"{question}: ").strip()
 
     def yes(self, key: str, question: str, default: bool = True) -> bool:
         reply = self.ask(key, question + (" (Y/n)" if default else " (y/N)"), "y" if default else "n").lower()
@@ -201,7 +210,9 @@ def check_sandbox(out: Callable[[str], None] = print) -> str:
     return "verified"
 
 
-def pick_for_workload(p: Prompter, out: Callable[[str], None], mem: dict[str, float], fallback: tuple[str, float]) -> tuple[str, float, int]:
+def pick_for_workload(p: Prompter, out: Callable[[str], None], mem: dict[str, float], fallback: tuple[str, float],
+                      installer: Callable[[], int] | None = None,
+                      key_checker: Callable[[str], dict[str, Any]] | None = None) -> tuple[str, float, int, dict[str, Any] | None]:
     """Ask what the local model is for, then offer up to three models that fit this machine, measured where we have
     results, plus a 4th option that links to the benchmark so the user can read it and come back."""
     out("\nWhat will the local model mostly do?")
@@ -212,6 +223,8 @@ def pick_for_workload(p: Prompter, out: Callable[[str], None], mem: dict[str, fl
     work = WORKLOADS[keys[int(raw) - 1] if raw.isdigit() and 0 < int(raw) <= len(keys) else keys[0]]
     ram = mem.get("vram_gb") or mem.get("ram_gb", 0.0)
     fits = [x for x in work["models"] if ram >= x[1] and claude.fits_safely(x[0], MODEL_GB.get(x[0], 0.0), mem)][:3]
+    if not fits and work is WORKLOADS["coding"]:
+        return choose_cloud(p, out, ram, fallback, installer, key_checker)
     if not fits:
         out("The models we measured for this need more memory than this machine has; offering the best fit instead.")
         fits = [(fallback[0], 0, "best fit for this memory", 0)]
@@ -226,14 +239,61 @@ def pick_for_workload(p: Prompter, out: Callable[[str], None], mem: dict[str, fl
         pick = p.ask("model_choice_after_learn", f"Pick 1-{len(fits)}, or type any Ollama model name", "1")
     if pick.isdigit() and 0 < int(pick) <= len(fits):
         m, _, _, ctx = fits[int(pick) - 1]
-        return m, MODEL_GB.get(m, 0.0), ctx
-    return pick, MODEL_GB.get(pick, 0.0), 0
+        return m, MODEL_GB.get(m, 0.0), ctx, None
+    return pick, MODEL_GB.get(pick, 0.0), 0, None
+
+
+def choose_cloud(p: Prompter, out: Callable[[str], None], mem_gb: float, fallback: tuple[str, float],
+                 installer: Callable[[], int] | None, key_checker: Callable[[str], dict[str, Any]] | None
+                 ) -> tuple[str, float, int, dict[str, Any] | None]:
+    """Under 24 GB: no local model we measured codes well enough. Offer a cloud model that takes over from HANDOFF.md
+    when Claude reaches its limit, with Claude supervising before (the plan) and after (the review)."""
+    link = LAB + "/free-agents#cloud"
+    out(f"\nLocal coding models need 24 GB; this machine has {mem_gb:.0f} GB. When Claude reaches its limit, a cloud model "
+        "can take over from Claude's HANDOFF.md plan, and Claude reviews the work when your limit resets:")
+    out("  1. GPT-6 Luna in Codex: included in ChatGPT Free and Go ($8/month). Passed our repo task 2/2, under a minute each.")
+    out("  2. Inkling 2 Small on OpenRouter, free: passed 2/2, about 2 minutes each. Your code goes to the model's provider;")
+    out("     free endpoints may keep prompts.")
+    out(f"  3. A small local model anyway: {claude.model_label(fallback[0])} (weaker, but nothing leaves this machine)")
+    out(f"  4. Learn which one to pick: {link}")
+    pick = p.ask("cloud_choice", "Pick a number", "1")
+    if pick == "4":
+        out(f"\nOpen {link} to compare them on the same task, then come back here.")
+        pick = p.ask("cloud_choice_after_learn", "Pick 1-3", "1")
+    if pick == "2":
+        out("\nOpenRouter: free models allow 50 requests a day. Adding $10 of credit once raises that to 1,000 a day, and free")
+        out("models don't use the credit, so nothing is charged. One task takes about 20-50 requests.")
+        out("Create a key at https://openrouter.ai/settings/keys")
+        key = p.secret("openrouter_key", "Paste your OpenRouter API key (hidden; saved only in ~/.inferoid/secrets.json, readable by you)")
+        if key:
+            check = (key_checker or cloud.check_openrouter_key)(key)
+            if not check.get("ok"):
+                out(f"That key didn't work ({check.get('error')}). Run inferoid setup again with a valid key.")
+            else:
+                cloud.save_secret("openrouter_api_key", key)
+                tier = check.get("free_tier")
+                out("Key saved. " + ("Free tier: 50 free requests a day; add $10 of credit once for 1,000 a day."
+                                     if tier else "Credit on the account: 1,000 free requests a day."))
+                return fallback[0], fallback[1], 0, {"kind": "openrouter", "model": cloud.OPENROUTER_MODEL}
+        out(f"No key saved; using the local model for now ({claude.model_label(fallback[0])}).")
+        return fallback[0], fallback[1], 0, None
+    if pick == "3":
+        return fallback[0], fallback[1], 0, None
+    if not cloud.codex_installed():
+        if p.yes("install_codex", "Codex isn't installed. Install it now (npm install -g @openai/codex)?"):
+            if (installer or cloud.install_codex)() != 0:
+                out("Codex didn't install (it needs Node.js and npm). Install it later with: npm install -g @openai/codex")
+        else:
+            out("Install it later with: npm install -g @openai/codex")
+    out("Sign in once with your ChatGPT account (Free or Go works): codex login")
+    return fallback[0], fallback[1], 0, {"kind": "codex"}
 
 
 def run(project: Path, answers: dict[str, str] | None = None, out: Callable[[str], None] = print,
         pull: Callable[[str], int] | None = None, claude_version: Callable[[], str] | None = None,
         bin_dir: Path | None = None, gpu_raiser: Callable | None = None, reporter: Callable[[], str] | None = None,
-        supervisor: str | None = None, sandbox_checker: Callable[[], str] | None = None) -> int:
+        supervisor: str | None = None, sandbox_checker: Callable[[], str] | None = None,
+        codex_installer: Callable[[], int] | None = None, key_checker: Callable[[str], dict[str, Any]] | None = None) -> int:
     p = Prompter(answers, out)
     out("Inferoid setup: a free local model for the work your paid agent doesn't need to do.\n")
 
@@ -249,49 +309,51 @@ def run(project: Path, answers: dict[str, str] | None = None, out: Callable[[str
     else:
         out(f"This machine: {chip}, {mem.get('ram_gb', 0):.0f} GB memory ({budget:.0f} GB usable by the GPU by default).")
     out(f"Safe setup for it: models that fit that budget, and a {cap:,}-token context cap so the Mac never runs out of memory.")
-    model, gb, ctx = pick_for_workload(p, out, mem, (model, gb))
+    model, gb, ctx, fallback = pick_for_workload(p, out, mem, (model, gb), codex_installer, key_checker)
+    cloud_fallback = bool(fallback and fallback.get("kind") in ("codex", "openrouter"))
     if ctx > cap:
         cap = ctx
         out(f"Context for this model: {cap:,} tokens, the size it was measured with on a 24 GB Mac.")
 
-    # 2. Ollama and the download
-    if not shutil.which("ollama"):
-        out("\nOllama is not installed. Install it from https://ollama.com/download (or: brew install ollama), open it, then run inferoid setup again.")
-        return 1
-    have = _ollama_models()
-    if have is None:
-        hint = (" In WSL2, run Ollama inside WSL (curl -fsSL https://ollama.com/install.sh | sh), or turn on mirrored "
-                "networking so the Windows Ollama app answers on localhost." if sandbox.is_wsl() else "")
-        out("\nOllama is installed but not running. Open the Ollama app (or run: ollama serve), then run inferoid setup again." + hint)
-        return 1
-    if model in have:
-        out(f"{model} is already downloaded.")
-    elif p.yes("download", f"Download {model} now?"):
-        rc = (pull or (lambda m: subprocess.call(["ollama", "pull", m])))(model)
-        if rc != 0:
-            out(f"Download failed. Try: ollama pull {model}")
+    # 2. Ollama and the download (not needed when a cloud model takes over)
+    if not cloud_fallback:
+        if not shutil.which("ollama"):
+            out("\nOllama is not installed. Install it from https://ollama.com/download (or: brew install ollama), open it, then run inferoid setup again.")
             return 1
-    else:
-        out(f"Skipped. Download it later with: ollama pull {model}")
-    # Ollama: context cap for this Mac, one model at a time, unload after 10 idle minutes.
-    wanted_env = {"OLLAMA_CONTEXT_LENGTH": str(cap), "OLLAMA_MAX_LOADED_MODELS": "1", "OLLAMA_KEEP_ALIVE": "10m"}
-    current = {k: os.environ.get(k) or claude._launchctl(k) for k in wanted_env}
-    if current != wanted_env:
-        if platform.system() == "Darwin":
-            if p.yes("context", f"Set Ollama to a {cap:,}-token context, one model loaded at a time, and unload after 10 idle minutes "
-                               "(restarts the Ollama app)?"):
-                for key, value in wanted_env.items():
-                    subprocess.call(["launchctl", "setenv", key, value])
-                if not claude.restart_ollama():
-                    out("Quit and reopen the Ollama app so it picks up these settings.")
+        have = _ollama_models()
+        if have is None:
+            hint = (" In WSL2, run Ollama inside WSL (curl -fsSL https://ollama.com/install.sh | sh), or turn on mirrored "
+                    "networking so the Windows Ollama app answers on localhost." if sandbox.is_wsl() else "")
+            out("\nOllama is installed but not running. Open the Ollama app (or run: ollama serve), then run inferoid setup again." + hint)
+            return 1
+        if model in have:
+            out(f"{model} is already downloaded.")
+        elif p.yes("download", f"Download {model} now?"):
+            rc = (pull or (lambda m: subprocess.call(["ollama", "pull", m])))(model)
+            if rc != 0:
+                out(f"Download failed. Try: ollama pull {model}")
+                return 1
         else:
-            out("Start Ollama with " + " ".join(f"{k}={v}" for k, v in wanted_env.items()))
+            out(f"Skipped. Download it later with: ollama pull {model}")
+        # Ollama: context cap for this Mac, one model at a time, unload after 10 idle minutes.
+        wanted_env = {"OLLAMA_CONTEXT_LENGTH": str(cap), "OLLAMA_MAX_LOADED_MODELS": "1", "OLLAMA_KEEP_ALIVE": "10m"}
+        current = {k: os.environ.get(k) or claude._launchctl(k) for k in wanted_env}
+        if current != wanted_env:
+            if platform.system() == "Darwin":
+                if p.yes("context", f"Set Ollama to a {cap:,}-token context, one model loaded at a time, and unload after 10 idle minutes "
+                                   "(restarts the Ollama app)?"):
+                    for key, value in wanted_env.items():
+                        subprocess.call(["launchctl", "setenv", key, value])
+                    if not claude.restart_ollama():
+                        out("Quit and reopen the Ollama app so it picks up these settings.")
+            else:
+                out("Start Ollama with " + " ".join(f"{k}={v}" for k, v in wanted_env.items()))
 
-    problem = claude.memory_problem(model, gb, mem)
-    if problem:
-        out("\nMemory: " + problem)
-        if gpu_raiser and claude.gpu_limit_needed(model, gb, mem):
-            gpu_raiser(claude.gpu_limit_needed(model, gb, mem), lambda q: p.yes("gpu_limit", q, default=False))
+        problem = claude.memory_problem(model, gb, mem)
+        if problem:
+            out("\nMemory: " + problem)
+            if gpu_raiser and claude.gpu_limit_needed(model, gb, mem):
+                gpu_raiser(claude.gpu_limit_needed(model, gb, mem), lambda q: p.yes("gpu_limit", q, default=False))
 
     # 3. coding agent
     if supervisor and supervisor != "claude":
@@ -316,13 +378,14 @@ def run(project: Path, answers: dict[str, str] | None = None, out: Callable[[str
     else:
         out("\nHandoff settings")
         handoff = p.yes("handoff", "Have Claude keep a HANDOFF.md plan (goal, steps, test command) so the local model can take over?")
-        threshold = 90.0
+        default_t = CLOUD_THRESHOLD if cloud_fallback else 90.0
+        threshold = default_t
         if handoff:
-            raw = p.ask("threshold", "At what usage % should Claude update HANDOFF.md first? (5-hour or weekly limit)", "90")
-            threshold = float(raw) if raw.replace(".", "", 1).isdigit() and 0 < float(raw) <= 100 else 90.0
+            raw = p.ask("threshold", "At what usage % should Claude update HANDOFF.md first? (5-hour or weekly limit)", f"{default_t:.0f}")
+            threshold = float(raw) if raw.replace(".", "", 1).isdigit() and 0 < float(raw) <= 100 else default_t
         scope = p.ask("scope", "Apply to all projects or only this folder? (all/here)", "all").lower()
         global_ = not scope.startswith("h")
-        out("When Claude reaches its limit:\n  1. Tell me, and I switch with one command (claude-local)\n"
+        out(f"When Claude reaches its limit:\n  1. Tell me, and I switch with one command ({NEXT_LAUNCHER if cloud_fallback else LAUNCHER})\n"
             "  2. Switch automatically (needs a local relay that carries your Claude login; off by default, coming soon)")
         takeover = p.ask("takeover", "Pick a number", "1")
         if takeover != "1":
@@ -341,9 +404,13 @@ def run(project: Path, answers: dict[str, str] | None = None, out: Callable[[str
     launcher = bin_dir / LAUNCHER
     launcher.write_text(f'#!/bin/sh\nexec "{sys.executable}" -m inferoid claude local "$@"\n')
     launcher.chmod(0o755)
+    next_launcher = bin_dir / NEXT_LAUNCHER
+    next_launcher.write_text(f'#!/bin/sh\nexec "{sys.executable}" -m inferoid next "$@"\n')
+    next_launcher.chmod(0o755)
     harness_name = "Claude Code" if not supervisor or supervisor == "claude" else supervisor.title()
     cfg: dict[str, Any] = {"model": model, "harness": harness_name.lower().replace(" ", "-"), "handoff": handoff, "threshold": threshold,
                            "scope": "all projects" if global_ else str(project), "takeover": "manual", "launcher": str(launcher),
+                           "fallback": fallback or {"kind": "local"},
                            "set_up_at": time.strftime("%Y-%m-%d %H:%M")}
     config_path().write_text(json.dumps(cfg, indent=2) + "\n")
 
@@ -360,13 +427,17 @@ def run(project: Path, answers: dict[str, str] | None = None, out: Callable[[str
 
     # 6. summary
     out("\nYou're all set.\n")
-    out(f"  Local model     {claude.model_label(model)} ({model})")
+    if cloud_fallback:
+        label = "GPT-6 Luna in Codex" if fallback["kind"] == "codex" else "Inkling 2 Small on OpenRouter (free)"
+        out(f"  At the limit    {label} takes over from HANDOFF.md; Claude reviews when your limit resets")
+    else:
+        out(f"  Local model     {claude.model_label(model)} ({model})")
     out(f"  Coding agent    {harness_name}")
     out(f"  Handoff plan    {'on: Claude keeps HANDOFF.md' if handoff else 'off'}")
     if handoff:
         out(f"  Reminder at     {threshold:.0f}% of the 5-hour or weekly limit")
         out(f"  Applies to      {'all projects (~/.claude)' if global_ else 'this folder (' + str(project) + ')'}")
-    out("  At the limit    you switch with: claude-local")
+    out(f"  Switch with     {NEXT_LAUNCHER if cloud_fallback else LAUNCHER}")
     out("  Sandbox         " + {"verified": "verified on this machine: local workers can't write outside their task folder, "
                                              "read your keys, or reach the internet",
                              "failed": "CHECK FAILED: do not run local workers unattended (see above)",
@@ -375,7 +446,10 @@ def run(project: Path, answers: dict[str, str] | None = None, out: Callable[[str
     out("  Usage report    inferoid scan && inferoid report")
     out("\nHow to use it:")
     out("  claude            work as usual with Opus or Sonnet" + (f"; at {threshold:.0f}% Claude updates HANDOFF.md" if handoff else ""))
-    out(f"  claude-local      local model on {claude.model_label(model)}, free; /model shows it as \"(local, free)\"")
+    if cloud_fallback:
+        out("  claude-next       the cloud model picks up from HANDOFF.md")
+    else:
+        out(f"  claude-local      local model on {claude.model_label(model)}, free; /model shows it as \"(local, free)\"")
     out("  inferoid claude status   usage, reset time, HANDOFF.md state")
     out("  Delegate safely  ask your supervisor to use the local_agent tool with a goal, the files and a check;")
     out("                   the work runs sandboxed in a copy and is applied only when the check passes.")
