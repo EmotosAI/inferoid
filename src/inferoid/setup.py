@@ -164,10 +164,28 @@ def configure_supervisors(supervisor: str, home: Path | None = None,
         out(line)
 
 
+def check_sandbox(out: Callable[[str], None] = print) -> str:
+    """Run the sandbox self-test quietly; return verified / failed / unavailable."""
+    from . import sandbox
+    if not sandbox.available():
+        return "unavailable"
+    import contextlib
+    import io
+    import tempfile
+    buf = io.StringIO()
+    with tempfile.TemporaryDirectory() as tmp, contextlib.redirect_stdout(buf):
+        rc = sandbox.selftest(Path(tmp) / "wt")
+    if rc != 0:
+        out("\nSandbox self-test FAILED:\n" + buf.getvalue())
+        return "failed"
+    out("\nSafety check: sandbox self-test passed (" + str(buf.getvalue().count("PASS ")) + " checks)")
+    return "verified"
+
+
 def run(project: Path, answers: dict[str, str] | None = None, out: Callable[[str], None] = print,
         pull: Callable[[str], int] | None = None, claude_version: Callable[[], str] | None = None,
         bin_dir: Path | None = None, gpu_raiser: Callable | None = None, reporter: Callable[[], str] | None = None,
-        supervisor: str | None = None) -> int:
+        supervisor: str | None = None, sandbox_checker: Callable[[], str] | None = None) -> int:
     p = Prompter(answers, out)
     out("Inferoid setup: a free local model for the work your paid agent doesn't need to do.\n")
 
@@ -286,6 +304,11 @@ def run(project: Path, answers: dict[str, str] | None = None, out: Callable[[str
         except Exception as exc:  # the report must never break setup
             out(f"The report could not be built ({exc}). Try later: inferoid scan && inferoid report")
 
+    # 5b. safety: prove on THIS Mac that local workers are sandboxed (kernel-enforced), before anything runs unattended
+    sandbox_state = (sandbox_checker or check_sandbox)()
+    cfg["sandbox"] = sandbox_state
+    config_path().write_text(json.dumps(cfg, indent=2) + "\n")
+
     # 6. summary
     out("\nYou're all set.\n")
     out(f"  Local model     {claude.model_label(model)} ({model})")
@@ -295,11 +318,19 @@ def run(project: Path, answers: dict[str, str] | None = None, out: Callable[[str
         out(f"  Reminder at     {threshold:.0f}% of the 5-hour or weekly limit")
         out(f"  Applies to      {'all projects (~/.claude)' if global_ else 'this folder (' + str(project) + ')'}")
     out("  At the limit    you switch with: claude-local")
+    out("  Sandbox         " + {"verified": "verified on this Mac: local workers can't write outside their task folder, "
+                                             "read your keys, or reach the internet",
+                             "failed": "CHECK FAILED: do not run local workers unattended (see above)",
+                             "unavailable": "not available on this system (macOS only for now): run local workers "
+                                            "from a separate user account"}[sandbox_state])
     out("  Usage report    inferoid scan && inferoid report")
     out("\nHow to use it:")
     out("  claude            work as usual with Opus or Sonnet" + (f"; at {threshold:.0f}% Claude updates HANDOFF.md" if handoff else ""))
     out(f"  claude-local      local model on {claude.model_label(model)}, free; /model shows it as \"(local, free)\"")
     out("  inferoid claude status   usage, reset time, HANDOFF.md state")
+    out("  Delegate safely  ask your supervisor to use the local_agent tool with a goal, the files and a check;")
+    out("                   the work runs sandboxed in a copy and is applied only when the check passes.")
+    out("  Per-project      optional .inferoid.json: {\"model\": ..., \"link\": [data folders], \"allow_bash\": [...]}")
     if str(bin_dir) not in os.environ.get("PATH", "").split(os.pathsep):
         out(f"\nAdd {bin_dir} to your PATH to use claude-local:  echo 'export PATH=\"{bin_dir}:$PATH\"' >> ~/.zshrc")
     if handoff:
