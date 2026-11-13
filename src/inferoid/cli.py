@@ -127,6 +127,8 @@ def build_parser() -> argparse.ArgumentParser:
     run_local.add_argument("--deny-tool", action="append", default=[])
     run_local.add_argument("--share", action="store_true", help="Submit a metrics-only report to Forge")
     run_local.add_argument("--json", action="store_true")
+    run_local.add_argument("--no-sandbox", action="store_true",
+                           help="Run the local worker without the macOS sandbox (it then can write anywhere and reach the internet)")
     commands.add_parser("mcp", help="Run the stdio MCP server")
     bench = commands.add_parser("bench", help="Run isolated Claude Code benchmarks on local models")
     bench_cmds = bench.add_subparsers(dest="bench_command", required=True)
@@ -150,6 +152,8 @@ def build_parser() -> argparse.ArgumentParser:
     run_bench.add_argument("--reference")
     run_bench.add_argument("--no-submit", action="store_true")
     run_bench.add_argument("--force", action="store_true")
+    run_bench.add_argument("--no-sandbox", action="store_true",
+                           help="Run the local worker without the macOS sandbox (it then can write anywhere and reach the internet)")
     run_bench.add_argument("--no-clean", dest="clean", action="store_false",
                            help="For Ollama, send Claude Code's requests unchanged (OpenAI mode always uses the translator)")
     run_bench.add_argument("--keep", action="store_true")
@@ -224,6 +228,9 @@ def main(argv: list[str] | None = None) -> int:
     elif args.command == "run":
         from .dispatch import run_task
 
+        if args.no_sandbox:
+            os.environ["INFEROID_SANDBOX"] = "0"
+
         value = run_task(project=Path.cwd(), task=args.task, check=args.check, files=args.files, model=args.model,
                          engine=args.engine, engine_url=args.engine_url, engine_model=args.engine_model,
                          context=args.context, timeout=args.timeout, max_turns=args.max_turns,
@@ -253,6 +260,8 @@ def main(argv: list[str] | None = None) -> int:
         serve()
         return 0
     elif args.command == "bench":
+        if getattr(args, "no_sandbox", False):
+            os.environ["INFEROID_SANDBOX"] = "0"
         import signal
 
         def stop(signum, frame):  # treat kill/hangup like Ctrl+C: stop the run but still write the report

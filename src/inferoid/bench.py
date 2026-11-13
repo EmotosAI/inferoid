@@ -391,6 +391,14 @@ def run_claude(args: list[str], env: dict[str, str], worktree: Path, model: str,
     if monitor.weights and engine == "ollama":
         monitor.estimate = monitor.weights + claude.kv_estimate_gb(model, context) + claude.RUNTIME_GB
     lines: queue.Queue[str | None] = queue.Queue()
+    # Kernel sandbox for the local worker (on by default): writes only in the worktree, no secrets, no internet.
+    from . import sandbox as sandbox_mod
+    if os.environ.get("INFEROID_SANDBOX", "1") != "0":
+        if sandbox_mod.available():
+            args = sandbox_mod.wrap(args, worktree)
+            state["sandbox"] = "seatbelt"
+        else:
+            state["errors"].append("no sandbox on this system (macOS only for now); the worker ran unsandboxed")
     process = subprocess.Popen(args, cwd=worktree, env=env, stdin=subprocess.DEVNULL,
                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
                                bufsize=1, start_new_session=True)
@@ -753,7 +761,7 @@ def run(project: Path, brief_file: Path, check: str, pack: str, task: str, kind:
         report["reference"] = {key: ref[key] for key in ("model", "status", "wall_s", "tool_calls") if key in ref}
     if state.get("errors") or state.get("clean_changes"):
         # Kept in the local file for debugging; allowlisted_report() never sends it.
-        report["local_only"] = {"errors": [str(e)[:300] for e in state.get("errors", [])[:5]],
+        report["local_only"] = {"sandbox": state.get("sandbox", "none"), "errors": [str(e)[:300] for e in state.get("errors", [])[:5]],
                                 "clean_changes": state.get("clean_changes", {}),
                                 "max_sample_gap_s": state.get("max_sample_gap_s", 0.0)}
     path = write_report(report)
