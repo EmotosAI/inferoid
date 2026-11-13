@@ -61,6 +61,24 @@ inferoid setup
 - **GPU check:** `nvidia-smi` inside WSL2 should list your card. If it does, setup sizes models for it.
 - **Sandbox:** bubblewrap, same as Linux.
 
+## Under 24 GB? A cloud model takes over instead
+
+No local model we measured codes well enough below 24 GB of model memory (for example an 8-18 GB MacBook Air). There, setup offers a cloud model that picks up Claude's `HANDOFF.md` plan when you reach your limit:
+
+| Choice | Cost | On our repository task |
+|---|---|---|
+| **GPT-6 Luna in Codex** (recommended) | Included in ChatGPT Free and Go ($8/month) | 2/2, under a minute each |
+| **Inkling 2 Small on OpenRouter** | Free: 50 requests a day, or 1,000 a day after a one-time $10 credit (free models don't use the credit) | 2/2, about 2 minutes each |
+| A small local model | Free, offline | Weaker |
+
+How the handoff works:
+
+1. **At 70% of your 5-hour or weekly limit** (the default for cloud fallbacks), Claude writes or updates `HANDOFF.md` while it still has room to plan well.
+2. **At the limit**, run `claude-next`: Codex (Luna) or Claude Code on Inkling picks up from the plan and runs its test command.
+3. **When your limit resets**, Claude reads `HANDOFF.md` and reviews what was done.
+
+Setup offers to install Codex (`npm install -g @openai/codex`) if it's missing; sign in once with `codex login`. An OpenRouter key is asked for without echo and saved only in `~/.inferoid/secrets.json`, readable by you. With a cloud fallback your code goes to that provider, and free endpoints may keep prompts. Results: [inferoid.com/lab/free-agents](https://inferoid.com/lab/free-agents#cloud).
+
 ## What `inferoid setup` does
 
 1. Looks at your machine (memory, and your NVIDIA GPU if you have one), then asks what the local model is for: **coding** (edits, tests and tool calls in your repos) or **general** (chat, writing). It shows up to three models that fit, each with its measured result, plus a 4th option, **Learn which one to pick**, that links to the benchmark ([coding on a 24 GB Mac](https://inferoid.com/lab/free-agents)) so you can compare and come back. For coding with 24 GB and up: Ornith 1.5 REAP-20B-A3B and Qwen3.6 35B-A3B REAP-48 (both passed 2/2 on a real repository task) and Nemotron 3.5 Lightning REAP-20B (1/2). Each coding model gets the context it was measured with (64K or 96K).
@@ -89,6 +107,7 @@ Every command the local model runs (including `python -c` and shell tricks) runs
 ```sh
 claude                    # Opus or Sonnet as usual; at 90% usage Claude updates HANDOFF.md first
 claude-local              # limit reached: Claude Code on the local model, starting from HANDOFF.md
+claude-next               # limit reached, under 24 GB: the cloud fallback you chose picks up HANDOFF.md
 inferoid claude status    # 5-hour and weekly usage, reset times, open steps in HANDOFF.md
 claude                    # limit reset: back to Claude, which reads HANDOFF.md too
 ```

@@ -129,6 +129,9 @@ def build_parser() -> argparse.ArgumentParser:
     run_local.add_argument("--json", action="store_true")
     run_local.add_argument("--no-sandbox", action="store_true",
                            help="Run the local worker without the macOS sandbox (it then can write anywhere and reach the internet)")
+    nxt = commands.add_parser("next", help="Claude reached its limit: hand HANDOFF.md to the fallback chosen at setup")
+    nxt.add_argument("--project", default=".")
+    nxt.add_argument("--dry-run", action="store_true")
     commands.add_parser("mcp", help="Run the stdio MCP server")
     bench = commands.add_parser("bench", help="Run isolated Claude Code benchmarks on local models")
     bench_cmds = bench.add_subparsers(dest="bench_command", required=True)
@@ -225,6 +228,17 @@ def main(argv: list[str] | None = None) -> int:
         from .setup import run
 
         return run(Path(args.project).resolve(), supervisor=args.supervisor)
+    elif args.command == "next":
+        import json as _json
+
+        from . import cloud
+        from .setup import config_path
+        try:
+            cfg = _json.loads(config_path().read_text())
+        except (OSError, ValueError):
+            print("Run inferoid setup first.")
+            return 1
+        return cloud.run_next(Path(args.project).resolve(), cfg, args.dry_run)
     elif args.command == "run":
         from .dispatch import run_task
 
