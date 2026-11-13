@@ -23,6 +23,25 @@ CHOICES = [
     ("gpt-oss:20b", 24, "second in the same test"),
     ("nemotron-3.5-bolt:e4b", 8, "for 16 GB Macs"),
 ]
+LAB = "https://inferoid.com/lab"
+# Workloads asked at setup. Coding models are the ones measured on a real repository task on a 24 GB Apple M4
+# (inferoid.com/lab/free-agents, 13 Nov 2026): (model, minimum RAM GB, measured result, context it was measured with).
+WORKLOADS = {
+    "coding": {
+        "label": "Coding agent: edits, tests and tool calls in your repos (Claude Code, Codex)",
+        "link": LAB + "/free-agents",
+        "models": [
+            ("hf.co/sleepyeldrazi/Ornith-1.5-REAP-20B-A3B-GGUF:UD-IQ4_NL", 24, "passed 2/2 on our repo task, about 5 min each", 65536),
+            ("hf.co/crucible-labs/Qwen3.6-35B-A3B-REAP-48-v2-GGUF", 24, "passed 2/2 on our repo task, about 7 min each", 98304),
+            ("hf.co/sleepyeldrazi/Nemotron-3.5-Lightning-30B-A3B-REAP-20B-LoRA-IQ4NL:IQ4_NL", 24, "passed 1/2, fastest at writing (about 32 tokens/s)", 65536),
+        ],
+    },
+    "general": {
+        "label": "General: chat, writing, quick questions",
+        "link": LAB,
+        "models": [(m, ram, why + " (not benchmarked for general use yet)", 0) for m, ram, why in CHOICES],
+    },
+}
 MODEL_GB = claude.MODEL_GB
 
 SUPERVISOR_SNIPPET = [
@@ -182,6 +201,35 @@ def check_sandbox(out: Callable[[str], None] = print) -> str:
     return "verified"
 
 
+def pick_for_workload(p: "Prompter", out: Callable[[str], None], mem: dict[str, float], fallback: tuple[str, float]) -> tuple[str, float, int]:
+    """Ask what the local model is for, then offer up to three models that fit this machine, measured where we have
+    results, plus a 4th option that links to the benchmark so the user can read it and come back."""
+    out("\nWhat will the local model mostly do?")
+    keys = list(WORKLOADS)
+    for i, key in enumerate(keys, 1):
+        out(f"  {i}. {WORKLOADS[key]['label']}")
+    raw = p.ask("workload", "Pick a number", "1")
+    work = WORKLOADS[keys[int(raw) - 1] if raw.isdigit() and 0 < int(raw) <= len(keys) else keys[0]]
+    ram = mem.get("ram_gb", 0.0)
+    fits = [x for x in work["models"] if ram >= x[1] and claude.fits_safely(x[0], MODEL_GB.get(x[0], 0.0), mem)][:3]
+    if not fits:
+        out(f"The models we measured for this need more memory than this machine has; offering the best fit instead.")
+        fits = [(fallback[0], 0, "best fit for this memory", 0)]
+    out("\nModels for this on your machine:")
+    for i, (m, _, why, _ctx) in enumerate(fits, 1):
+        out(f"  {i}. {claude.model_label(m)} (~{MODEL_GB.get(m, 0.0):.0f} GB): {why}")
+    learn = len(fits) + 1
+    out(f"  {learn}. Learn which one to pick: {work['link']}")
+    pick = p.ask("model_choice", "Pick a number, or type any Ollama model name", "1")
+    if pick == str(learn):
+        out(f"\nOpen {work['link']} to compare them on the same task, then come back here.")
+        pick = p.ask("model_choice_after_learn", f"Pick 1-{len(fits)}, or type any Ollama model name", "1")
+    if pick.isdigit() and 0 < int(pick) <= len(fits):
+        m, _, _, ctx = fits[int(pick) - 1]
+        return m, MODEL_GB.get(m, 0.0), ctx
+    return pick, MODEL_GB.get(pick, 0.0), 0
+
+
 def run(project: Path, answers: dict[str, str] | None = None, out: Callable[[str], None] = print,
         pull: Callable[[str], int] | None = None, claude_version: Callable[[], str] | None = None,
         bin_dir: Path | None = None, gpu_raiser: Callable | None = None, reporter: Callable[[], str] | None = None,
@@ -197,15 +245,10 @@ def run(project: Path, answers: dict[str, str] | None = None, out: Callable[[str
     model, gb = claude.pick_model(mem)
     out(f"This machine: {chip}, {mem.get('ram_gb', 0):.0f} GB memory ({budget:.0f} GB usable by the GPU by default).")
     out(f"Safe setup for it: models that fit that budget, and a {cap:,}-token context cap so the Mac never runs out of memory.")
-    out(f"Recommended model: {claude.model_label(model)} ({model}, ~{gb:.0f} GB): "
-        + next((why for m, _, why in CHOICES if m == model), "best fit for this memory"))
-    if not p.yes("use_recommended", "Use it?"):
-        fits = [c for c in CHOICES if claude.fits_safely(c[0], MODEL_GB.get(c[0], 0.0), mem)] or CHOICES[-1:]
-        for i, (m, _, why) in enumerate(fits, 1):
-            out(f"  {i}. {claude.model_label(m)} ({m}): {why}")
-        pick = p.ask("model_choice", "Pick a number, or type any Ollama model name", "1")
-        model = fits[int(pick) - 1][0] if pick.isdigit() and 0 < int(pick) <= len(fits) else pick
-        gb = MODEL_GB.get(model, 0.0)
+    model, gb, ctx = pick_for_workload(p, out, mem, (model, gb))
+    if ctx > cap:
+        cap = ctx
+        out(f"Context for this model: {cap:,} tokens, the size it was measured with on a 24 GB Mac.")
 
     # 2. Ollama and the download
     if not shutil.which("ollama"):
